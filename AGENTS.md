@@ -12,6 +12,24 @@ Build small, reusable, offline forensic tools for `nomad operator debug` bundles
 
 The toolkit should help an engineer move from raw bundle artifacts to defensible evidence without altering customer data or flooding the terminal.
 
+## Origin
+
+These rules are not generic engineering caution — they come from a real production
+incident investigation. Early in that investigation, a customer's own account of
+what caused the incident looked plausible and matched the surface-level timeline,
+but cross-checking primary timestamps against the actual graphs showed the
+suspected cause started complaining only *after* the real trigger was already
+underway. Getting from the plausible-but-wrong story to the actual causal chain
+took weeks of manual log correlation, much of it fighting terminal output limits
+and half-remembered field semantics rather than the analysis itself.
+
+Every non-negotiable rule below maps to a specific way that process went wrong
+before it went right: unbounded output that buried the signal, a metric read at
+the wrong scale, a relationship assumed from timing instead of an authoritative
+field, evidence quietly dropped because it didn't fit the working theory. Treat
+these rules as load-bearing, not stylistic — relaxing one reintroduces a failure
+mode this toolkit exists to prevent.
+
 ## Non-Negotiable Rules
 
 ### Source data is read-only

@@ -164,6 +164,7 @@ JSON should retain richer provenance and relationships.
 
 Treat these as known-good baselines unless a test demonstrates a defect:
 
+- `_bundlelib.py` (shared helpers; not a standalone tool, imported by all seven below)
 - `inventory_bundle_v2.py`
 - `find_identifiers_v2.py`
 - `extract_window_v2.py`
@@ -171,6 +172,12 @@ Treat these as known-good baselines unless a test demonstrates a defect:
 - `correlate_timeline_v2.py`
 - `alloc_lineage_v2.py`
 - `eval_trace.py`
+
+`_bundlelib.py` must stay next to the scripts that import it (`import _bundlelib`
+relies on Python putting the executed script's own directory on `sys.path`).
+Any change to it is a change to all seven scripts at once: follow the same
+preserve/test/compare process below, and re-run every script against a
+representative bundle, not just the one that motivated the change.
 
 Do not casually rewrite or replace a validated script. If making a substantial change:
 
@@ -237,28 +244,74 @@ Likely future tools include:
 
 These should follow the same read-only, offline, bounded-output, provenance-first design.
 
-## Known Duplication / Drift
+## Shared Module Extraction (2026-08-17)
 
-Each validated script currently defines its own copies of common helpers
-(bundle-root detection, timestamp parsing, eventstream iteration,
-Markdown escaping, hashing, etc.) rather than importing a shared module.
-This was a deliberate early tradeoff ("prefer clear standalone scripts
-... until repeated code is stable enough to justify shared modules") but
-the duplication has already caused real drift, not just repetition:
+The duplication previously logged here was extracted into `_bundlelib.py`
+after auditing all 7 scripts function-by-function, reconciling every
+behavioral difference deliberately, and testing the result against
+`bundles/nomad-debug-test` (before/after diffs on every output file for
+every script; identical unless a fix is listed below).
 
-- `find_bundle_root()` exists in all 7 scripts as 4 non-identical
-  implementations (different ambiguous-match handling and iteration
-  style). A bug fixed in one copy will not propagate to the others.
-- `alloc_lineage_v2.py` and `eval_trace.py` each implement their own
-  relationship-graph traversal (`add_edge` / `build_relationships` /
-  `discover_connected` / `detect_cycles` / `canonical_paths`) for
-  chasing lineage/eval chains, and the two implementations have already
-  diverged in behavior, not just formatting.
+Genuinely domain-specific code was deliberately left duplicated rather than
+forced into a shared abstraction: `add_edge`/`build_relationships` in
+`alloc_lineage_v2.py` and `eval_trace.py` build different edge types from
+different Nomad fields and read different dataclass field names
+(`from_alloc`/`to_alloc` vs `from_eval`/`to_eval`) — only the
+domain-agnostic graph traversal beneath them (`discover_connected`,
+`detect_cycles`, `canonical_paths`, confirmed byte-identical modulo
+variable names) moved to `_bundlelib.py`. Sample/excerpt truncation
+(`sample_around_match`, `excerpt_around`, `excerpt`) and log-line
+classification (`classify_monitor_line`, `classify_log`) were also left
+local: each has genuinely different signatures or taxonomy per tool, and
+unifying truncation logic that touches evidence sample text is exactly the
+kind of "silently pick one variant" risk this process exists to avoid.
 
-Before extracting a shared `_bundlelib.py` (or similar), reconcile these
-behavioral differences deliberately — decide which variant is correct
-(or whether the divergence is intentional given alloc vs. eval
-semantics) — rather than silently picking one copy and discarding the
-other's edge-case handling. Follow the normal "Before Starting New Work"
-and "Current Validated Scripts" change process for this, since it
-touches every validated script at once.
+Consolidating the duplication surfaced defects that had already resulted
+from four/five copies of the same logic drifting apart — not hypothetical
+risks, confirmed by diffing real output against `bundles/nomad-debug-test`:
+
+- **`correlate_timeline_v2.py` silently dropped interval-snapshot evidence
+  on JSON-lines bundles.** Unlike the other scripts, it read
+  `allocations.json`/`evaluations.json`/`nodes.json` with a single
+  `json.loads()` and no JSON-lines fallback — a shape this project's own
+  "Known Bundle/Test Characteristics" section documents as real. Against
+  the test bundle (whose `evaluations.json` files are JSON-lines) this
+  silently produced 0 of 10 interval observations for a traced evaluation.
+  After the fix: 10 of 10, and the JSON-lines file count is now printed
+  and included in `summary.json`. This is the one violating AGENTS.md's
+  own "parsing failures should be counted and reported" rule in the wild.
+- **`extract_window_v2.py` could double-count a timestamp and mis-window a
+  log line.** Its `timestamps_in_text()` was the one copy (of five) that
+  didn't mask overlapping regex spans, so an offset-qualified monitor.log
+  timestamp like `...T10:18:17.883-0700` could also match the trailing
+  naive-timestamp pattern and yield a second, wrong-by-the-offset reading
+  of the same instant. A monitor.log line could then be included in (or
+  excluded from) an extracted window based on the spurious reading instead
+  of the correct one.
+- **`inventory_bundle_v2.py` under-detected and mis-labeled timestamps.**
+  Its `TIMESTAMP_PATTERNS` list was missing the offset-without-colon and
+  `... UTC` forms the other four scripts already had, and its timestamp
+  parser didn't apply an offset even when one was captured elsewhere —
+  so a monitor.log line's detected first/last timestamp could be silently
+  off by the local UTC offset (confirmed on the test bundle: a `-0700`
+  monitor.log timestamp was reported as if it were already UTC).
+- **`alloc_lineage_v2.py` and `eval_trace.py`'s `unixish_to_dt()` silently
+  failed on more timestamp string forms** than `alloc_lifecycle_v2.py`'s
+  and `correlate_timeline_v2.py`'s copies (no offset-without-colon or
+  `... UTC` handling for string-typed CreateTime/ModifyTime fields).
+- **`md_escape()` could blank out a legitimate falsy value.** Two of the
+  seven copies used `str(value or "")`, which also empties `0`/`False`,
+  not just `None` — a retry count or exit code of 0 would silently vanish
+  from a Markdown table instead of being shown, contradicting "do not
+  erase contradictory or partial evidence."
+- **`find_bundle_root()`'s missing `try/except OSError`** (one of four
+  copies, formerly in `correlate_timeline_v2.py`) would have raised an
+  unhandled exception and dumped a Python traceback instead of the tool's
+  normal bounded error output, if bundle-root iteration ever hit a
+  permission error.
+
+None of these were hypothetical: each is the direct, predictable result of
+copy-paste-and-adapt across seven scripts over time, which is exactly what
+this section warned about before the extraction. See `_bundlelib.py`'s
+module docstring and per-function docstrings for the reconciliation
+rationale on each one.

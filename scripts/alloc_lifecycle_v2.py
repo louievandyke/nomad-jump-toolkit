@@ -40,9 +40,11 @@ import re
 import shutil
 import sys
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
+
+import _bundlelib as bl
 
 
 DEFAULT_SAMPLES = 100
@@ -63,17 +65,6 @@ PROFILE_TEXT_RE = re.compile(
     r"^(?:goroutine-debug1|goroutine-debug2)_\d{4}\.txt$"
 )
 
-# Ordered from most specific to least specific. We deliberately mask matched
-# spans so a timestamp with an offset is not also re-matched by a naive pattern.
-TIMESTAMP_PATTERNS = [
-    re.compile(r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\b"),
-    re.compile(r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?[+-]\d{2}:\d{2})\b"),
-    re.compile(r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?[+-]\d{4})\b"),
-    re.compile(r"\b(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) ([+-]\d{4}) UTC\b"),
-    re.compile(r"\b(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?)\b"),
-]
-
-
 @dataclass
 class TimelineEvent:
     timestamp_utc: str
@@ -83,162 +74,6 @@ class TimelineEvent:
     source_line: Optional[int]
     event: str
     details: str
-
-
-def iso(dt: Optional[datetime]) -> str:
-    if dt is None:
-        return ""
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def normalize_offset_no_colon(raw: str) -> str:
-    m = re.search(r"([+-])(\d{2})(\d{2})$", raw)
-    if not m:
-        return raw
-    return raw[:m.start()] + f"{m.group(1)}{m.group(2)}:{m.group(3)}"
-
-
-def parse_ts(raw: str) -> Optional[datetime]:
-    raw = raw.strip()
-
-    m = re.fullmatch(
-        r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) ([+-]\d{4}) UTC",
-        raw,
-    )
-    if m:
-        base, offset = m.groups()
-        offset = offset[:3] + ":" + offset[3:]
-        try:
-            return datetime.fromisoformat(base + offset).astimezone(timezone.utc)
-        except ValueError:
-            return None
-
-    try:
-        if raw.endswith("Z"):
-            return datetime.fromisoformat(raw[:-1] + "+00:00").astimezone(timezone.utc)
-
-        normalized = normalize_offset_no_colon(raw)
-        dt = datetime.fromisoformat(normalized)
-
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-
-        return dt.astimezone(timezone.utc)
-    except ValueError:
-        return None
-
-
-def timestamps_in_text(text: str) -> list[datetime]:
-    """
-    Extract timestamps without double-counting overlapping forms.
-
-    Example:
-      2026-08-14T10:17:40.950820-0700
-    should produce only 17:17:40.950820Z, not also 10:17:40.950820Z.
-    """
-    spans: list[tuple[int, int]] = []
-    results: list[datetime] = []
-    seen = set()
-
-    for pattern in TIMESTAMP_PATTERNS:
-        for match in pattern.finditer(text):
-            start, end = match.span()
-
-            if any(not (end <= s or start >= e) for s, e in spans):
-                continue
-
-            if len(match.groups()) == 2:
-                raw = f"{match.group(1)} {match.group(2)} UTC"
-            else:
-                raw = match.group(1)
-
-            dt = parse_ts(raw)
-            if dt is None:
-                continue
-
-            spans.append((start, end))
-
-            key = dt.isoformat()
-            if key not in seen:
-                seen.add(key)
-                results.append(dt)
-
-    return results
-
-
-def unixish_to_dt(value: Any) -> Optional[datetime]:
-    if value is None:
-        return None
-
-    if isinstance(value, str):
-        parsed = parse_ts(value)
-        if parsed:
-            return parsed
-        try:
-            value = int(value)
-        except ValueError:
-            return None
-
-    if not isinstance(value, (int, float)):
-        return None
-
-    num = float(value)
-
-    try:
-        if num > 1e17:
-            return datetime.fromtimestamp(num / 1e9, tz=timezone.utc)
-        if num > 1e14:
-            return datetime.fromtimestamp(num / 1e6, tz=timezone.utc)
-        if num > 1e11:
-            return datetime.fromtimestamp(num / 1e3, tz=timezone.utc)
-        if num > 1e9:
-            return datetime.fromtimestamp(num, tz=timezone.utc)
-    except (OSError, OverflowError, ValueError):
-        return None
-
-    return None
-
-
-def find_bundle_root(root: Path) -> Optional[Path]:
-    if (
-        (root / "cluster").is_dir()
-        and (root / "interval").is_dir()
-        and (root / "server").is_dir()
-        and (root / "client").is_dir()
-    ):
-        return root
-
-    candidates = []
-
-    try:
-        for child in root.iterdir():
-            if not child.is_dir():
-                continue
-
-            if (
-                (child / "cluster").is_dir()
-                and (child / "interval").is_dir()
-                and (child / "server").is_dir()
-                and (child / "client").is_dir()
-            ):
-                candidates.append(child)
-
-    except OSError:
-        return None
-
-    return candidates[0] if len(candidates) == 1 else None
-
-
-def load_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8", errors="replace") as fh:
-        return json.load(fh)
-
-
-def first_value(d: dict, keys: Iterable[str]) -> Any:
-    for key in keys:
-        if key in d:
-            return d[key]
-    return None
 
 
 def find_alloc_objects(obj: Any, alloc_id: str) -> list[dict]:
@@ -287,11 +122,11 @@ def snapshot_capture_timestamp(interval_dir: Path) -> Optional[datetime]:
 
     if metrics.is_file():
         try:
-            data = load_json(metrics)
+            data = bl.load_json(metrics)
             if isinstance(data, dict):
                 raw = data.get("Timestamp")
                 if isinstance(raw, str):
-                    parsed = parse_ts(raw)
+                    parsed = bl.parse_ts(raw)
                     if parsed:
                         return parsed
         except (OSError, json.JSONDecodeError):
@@ -306,7 +141,7 @@ def snapshot_capture_timestamp(interval_dir: Path) -> Optional[datetime]:
             with path.open("r", encoding="utf-8", errors="replace") as fh:
                 text = fh.read(65536)
 
-            timestamps = timestamps_in_text(text)
+            timestamps = bl.timestamps_in_text(text)
             if timestamps:
                 return min(timestamps)
 
@@ -317,32 +152,32 @@ def snapshot_capture_timestamp(interval_dir: Path) -> Optional[datetime]:
 
 
 def snapshot_summary(alloc: dict, interval_id: str, source_file: str, capture_dt: Optional[datetime]) -> dict:
-    create_dt = unixish_to_dt(first_value(alloc, ("CreateTime", "CreateTimestamp", "CreatedAt")))
-    modify_dt = unixish_to_dt(first_value(alloc, ("ModifyTime", "ModifyTimestamp", "UpdatedAt")))
+    create_dt = bl.unixish_to_dt(bl.first_value(alloc, ("CreateTime", "CreateTimestamp", "CreatedAt")))
+    modify_dt = bl.unixish_to_dt(bl.first_value(alloc, ("ModifyTime", "ModifyTimestamp", "UpdatedAt")))
 
     job = alloc.get("Job")
 
-    job_id = first_value(alloc, ("JobID",))
-    namespace = first_value(alloc, ("Namespace",))
-    task_group = first_value(alloc, ("TaskGroup", "TaskGroupName"))
-    node_id = first_value(alloc, ("NodeID",))
-    node_name = first_value(alloc, ("NodeName",))
-    client_status = first_value(alloc, ("ClientStatus",))
-    desired_status = first_value(alloc, ("DesiredStatus",))
-    previous_alloc = first_value(alloc, ("PreviousAllocation", "PreviousAllocID"))
-    next_alloc = first_value(alloc, ("NextAllocation", "NextAllocID"))
-    eval_id = first_value(alloc, ("EvalID",))
-    deployment_id = first_value(alloc, ("DeploymentID",))
+    job_id = bl.first_value(alloc, ("JobID",))
+    namespace = bl.first_value(alloc, ("Namespace",))
+    task_group = bl.first_value(alloc, ("TaskGroup", "TaskGroupName"))
+    node_id = bl.first_value(alloc, ("NodeID",))
+    node_name = bl.first_value(alloc, ("NodeName",))
+    client_status = bl.first_value(alloc, ("ClientStatus",))
+    desired_status = bl.first_value(alloc, ("DesiredStatus",))
+    previous_alloc = bl.first_value(alloc, ("PreviousAllocation", "PreviousAllocID"))
+    next_alloc = bl.first_value(alloc, ("NextAllocation", "NextAllocID"))
+    eval_id = bl.first_value(alloc, ("EvalID",))
+    deployment_id = bl.first_value(alloc, ("DeploymentID",))
 
     if isinstance(job, dict):
-        job_id = job_id or first_value(job, ("ID", "Name"))
-        namespace = namespace or first_value(job, ("Namespace",))
+        job_id = job_id or bl.first_value(job, ("ID", "Name"))
+        namespace = namespace or bl.first_value(job, ("Namespace",))
 
     return {
         "interval_id": interval_id,
         "source_file": source_file,
-        "capture_timestamp_utc": iso(capture_dt),
-        "id": first_value(alloc, ("ID", "Id", "id", "AllocID", "AllocationID")),
+        "capture_timestamp_utc": bl.iso(capture_dt),
+        "id": bl.first_value(alloc, ("ID", "Id", "id", "AllocID", "AllocationID")),
         "job_id": job_id,
         "namespace": namespace,
         "task_group": task_group,
@@ -354,10 +189,10 @@ def snapshot_summary(alloc: dict, interval_id: str, source_file: str, capture_dt
         "client_status": client_status,
         "previous_allocation": previous_alloc,
         "next_allocation": next_alloc,
-        "create_time_utc": iso(create_dt),
-        "modify_time_utc": iso(modify_dt),
-        "desired_description": first_value(alloc, ("DesiredDescription",)),
-        "client_description": first_value(alloc, ("ClientDescription",)),
+        "create_time_utc": bl.iso(create_dt),
+        "modify_time_utc": bl.iso(modify_dt),
+        "desired_description": bl.first_value(alloc, ("DesiredDescription",)),
+        "client_description": bl.first_value(alloc, ("ClientDescription",)),
         "reschedule_tracker": alloc.get("RescheduleTracker"),
         "desired_transition": alloc.get("DesiredTransition"),
         "task_states": alloc.get("TaskStates"),
@@ -385,7 +220,7 @@ def collect_snapshots(bundle_root: Path, root: Path, alloc_id: str) -> list[dict
             continue
 
         try:
-            data = load_json(path)
+            data = bl.load_json(path)
         except (OSError, json.JSONDecodeError):
             continue
 
@@ -420,7 +255,7 @@ def build_snapshot_events(snapshots: list[dict]) -> list[TimelineEvent]:
     previous = None
 
     for snapshot in snapshots:
-        capture_dt = parse_ts(snapshot.get("capture_timestamp_utc", ""))
+        capture_dt = bl.parse_ts(snapshot.get("capture_timestamp_utc", ""))
 
         if capture_dt is None:
             sort_ts = float("inf")
@@ -441,7 +276,7 @@ def build_snapshot_events(snapshots: list[dict]) -> list[TimelineEvent]:
 
             events.append(
                 TimelineEvent(
-                    timestamp_utc=iso(capture_dt),
+                    timestamp_utc=bl.iso(capture_dt),
                     sort_ts=sort_ts,
                     source_type="allocation_snapshot",
                     source_file=snapshot["source_file"],
@@ -488,7 +323,7 @@ def build_snapshot_events(snapshots: list[dict]) -> list[TimelineEvent]:
 
                 events.append(
                     TimelineEvent(
-                        timestamp_utc=iso(capture_dt),
+                        timestamp_utc=bl.iso(capture_dt),
                         sort_ts=sort_ts,
                         source_type="allocation_snapshot",
                         source_file=snapshot["source_file"],
@@ -501,48 +336,6 @@ def build_snapshot_events(snapshots: list[dict]) -> list[TimelineEvent]:
         previous = snapshot
 
     return events
-
-
-def iter_eventstream_records(path: Path) -> Iterable[tuple[int, dict]]:
-    """
-    Supports newline-delimited JSON objects and a JSON array fallback.
-    """
-    try:
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            first_nonempty = None
-
-            for pos, line in enumerate(fh, start=1):
-                if line.strip():
-                    first_nonempty = line.lstrip()
-                    break
-
-        if first_nonempty is None:
-            return
-
-        if first_nonempty.startswith("["):
-            data = load_json(path)
-            if isinstance(data, list):
-                for idx, item in enumerate(data, start=1):
-                    if isinstance(item, dict):
-                        yield idx, item
-            return
-
-        with path.open("r", encoding="utf-8", errors="replace") as fh:
-            for line_no, line in enumerate(fh, start=1):
-                line = line.strip()
-                if not line:
-                    continue
-
-                try:
-                    item = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-
-                if isinstance(item, dict):
-                    yield line_no, item
-
-    except OSError:
-        return
 
 
 def event_contains_alloc(record: dict, alloc_id: str) -> bool:
@@ -564,11 +357,11 @@ def event_timestamp(record: dict) -> Optional[datetime]:
     for key in ("Timestamp", "Time", "EventTime"):
         value = record.get(key)
         if isinstance(value, str):
-            dt = parse_ts(value)
+            dt = bl.parse_ts(value)
             if dt:
                 return dt
         elif isinstance(value, (int, float)):
-            dt = unixish_to_dt(value)
+            dt = bl.unixish_to_dt(value)
             if dt:
                 return dt
 
@@ -580,7 +373,7 @@ def event_timestamp(record: dict) -> Optional[datetime]:
 
         if isinstance(alloc, dict):
             for key in ("ModifyTime", "CreateTime"):
-                dt = unixish_to_dt(alloc.get(key))
+                dt = bl.unixish_to_dt(alloc.get(key))
                 if dt:
                     return dt
 
@@ -588,7 +381,7 @@ def event_timestamp(record: dict) -> Optional[datetime]:
         for key in ("Timestamp", "Time"):
             value = payload.get(key)
             if isinstance(value, str):
-                dt = parse_ts(value)
+                dt = bl.parse_ts(value)
                 if dt:
                     return dt
 
@@ -653,7 +446,7 @@ def parse_eventstream(
 
     print("Parsing cluster/eventstream.json structurally...")
 
-    for line_no, record in iter_eventstream_records(path):
+    for line_no, record in bl.iter_eventstream_records(path):
         if not event_contains_alloc(record, alloc_id):
             continue
 
@@ -684,7 +477,7 @@ def parse_eventstream(
 
         events.append(
             TimelineEvent(
-                timestamp_utc=iso(dt),
+                timestamp_utc=bl.iso(dt),
                 sort_ts=dt.timestamp() if dt else float("inf"),
                 source_type="event_stream",
                 source_file=str(path.relative_to(root)),
@@ -729,9 +522,9 @@ def augment_summary_from_eventstream(summary: dict, records: list[dict]) -> dict
                 summary[key] = value
 
         if summary.get("create_time_utc") in (None, ""):
-            dt = unixish_to_dt(alloc.get("CreateTime"))
+            dt = bl.unixish_to_dt(alloc.get("CreateTime"))
             if dt:
-                summary["create_time_utc"] = iso(dt)
+                summary["create_time_utc"] = bl.iso(dt)
 
     return summary
 
@@ -845,7 +638,7 @@ def scan_line_sources(
                     if len(events) >= sample_limit:
                         continue
 
-                    timestamps = timestamps_in_text(line)
+                    timestamps = bl.timestamps_in_text(line)
                     dt = timestamps[0] if timestamps else None
 
                     source_type = (
@@ -856,7 +649,7 @@ def scan_line_sources(
 
                     events.append(
                         TimelineEvent(
-                            timestamp_utc=iso(dt),
+                            timestamp_utc=bl.iso(dt),
                             sort_ts=dt.timestamp() if dt else float("inf"),
                             source_type=source_type,
                             source_file=str(path.relative_to(root)),
@@ -900,12 +693,6 @@ def write_timeline_csv(events: list[TimelineEvent], path: Path) -> None:
             writer.writerow(row)
 
 
-def md_escape(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).replace("|", r"\|").replace("\n", " ")
-
-
 def write_markdown(
     path: Path,
     alloc_id: str,
@@ -917,16 +704,16 @@ def write_markdown(
         fh.write(f"# Allocation Lifecycle: `{alloc_id}`\n\n")
 
         fh.write("## Allocation Summary\n\n")
-        fh.write(f"- Job: `{md_escape(summary.get('job_id', ''))}`\n")
-        fh.write(f"- Namespace: `{md_escape(summary.get('namespace', ''))}`\n")
-        fh.write(f"- Task group: `{md_escape(summary.get('task_group', ''))}`\n")
-        fh.write(f"- Node ID: `{md_escape(summary.get('node_id', ''))}`\n")
-        fh.write(f"- Node name: `{md_escape(summary.get('node_name', ''))}`\n")
-        fh.write(f"- Eval ID: `{md_escape(summary.get('eval_id', ''))}`\n")
-        fh.write(f"- Deployment ID: `{md_escape(summary.get('deployment_id', ''))}`\n")
-        fh.write(f"- Previous allocation: `{md_escape(summary.get('previous_allocation', ''))}`\n")
-        fh.write(f"- Next allocation: `{md_escape(summary.get('next_allocation', ''))}`\n")
-        fh.write(f"- Create time: `{md_escape(summary.get('create_time_utc', ''))}`\n")
+        fh.write(f"- Job: `{bl.md_escape(summary.get('job_id', ''))}`\n")
+        fh.write(f"- Namespace: `{bl.md_escape(summary.get('namespace', ''))}`\n")
+        fh.write(f"- Task group: `{bl.md_escape(summary.get('task_group', ''))}`\n")
+        fh.write(f"- Node ID: `{bl.md_escape(summary.get('node_id', ''))}`\n")
+        fh.write(f"- Node name: `{bl.md_escape(summary.get('node_name', ''))}`\n")
+        fh.write(f"- Eval ID: `{bl.md_escape(summary.get('eval_id', ''))}`\n")
+        fh.write(f"- Deployment ID: `{bl.md_escape(summary.get('deployment_id', ''))}`\n")
+        fh.write(f"- Previous allocation: `{bl.md_escape(summary.get('previous_allocation', ''))}`\n")
+        fh.write(f"- Next allocation: `{bl.md_escape(summary.get('next_allocation', ''))}`\n")
+        fh.write(f"- Create time: `{bl.md_escape(summary.get('create_time_utc', ''))}`\n")
         fh.write(f"- Interval snapshots containing allocation: **{len(snapshots)}**\n")
         fh.write(f"- Timeline events retained: **{len(events)}**\n\n")
 
@@ -942,13 +729,13 @@ def write_markdown(
             for snap in snapshots:
                 fh.write(
                     f"| `{snap['interval_id']}` | "
-                    f"{md_escape(snap.get('capture_timestamp_utc', ''))} | "
-                    f"{md_escape(snap.get('modify_time_utc', ''))} | "
-                    f"{md_escape(snap.get('desired_status', ''))} | "
-                    f"{md_escape(snap.get('client_status', ''))} | "
-                    f"`{md_escape(snap.get('node_id', ''))}` | "
-                    f"`{md_escape(snap.get('previous_allocation', ''))}` | "
-                    f"`{md_escape(snap.get('next_allocation', ''))}` |\n"
+                    f"{bl.md_escape(snap.get('capture_timestamp_utc', ''))} | "
+                    f"{bl.md_escape(snap.get('modify_time_utc', ''))} | "
+                    f"{bl.md_escape(snap.get('desired_status', ''))} | "
+                    f"{bl.md_escape(snap.get('client_status', ''))} | "
+                    f"`{bl.md_escape(snap.get('node_id', ''))}` | "
+                    f"`{bl.md_escape(snap.get('previous_allocation', ''))}` | "
+                    f"`{bl.md_escape(snap.get('next_allocation', ''))}` |\n"
                 )
         else:
             fh.write("Allocation was not found in interval `allocations.json` snapshots.\n")
@@ -966,10 +753,10 @@ def write_markdown(
                     source += f":{event.source_line}"
 
                 fh.write(
-                    f"| {md_escape(event.timestamp_utc)} | "
-                    f"`{md_escape(source)}` | "
-                    f"{md_escape(event.event)} | "
-                    f"{md_escape(event.details)} |\n"
+                    f"| {bl.md_escape(event.timestamp_utc)} | "
+                    f"`{bl.md_escape(source)}` | "
+                    f"{bl.md_escape(event.event)} | "
+                    f"{bl.md_escape(event.details)} |\n"
                 )
         else:
             fh.write("No timeline events were found for this allocation.\n")
@@ -1121,7 +908,7 @@ def main() -> int:
 
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    bundle_root = find_bundle_root(root)
+    bundle_root = bl.find_bundle_root(root)
 
     print(f"Search root      : {root}")
     print(f"Allocation       : {alloc_id}")

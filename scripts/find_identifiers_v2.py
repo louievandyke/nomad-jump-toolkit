@@ -59,6 +59,8 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Iterable, Optional
 
+import _bundlelib as bl
+
 TEXT_EXTENSIONS = {
     ".log", ".txt", ".json", ".jsonl", ".ndjson", ".csv", ".tsv",
     ".hcl", ".nomad", ".md", ".yaml", ".yml", ".conf", ".cfg",
@@ -326,10 +328,6 @@ def write_results_csv(matches: list[FileMatch], path: Path) -> None:
             writer.writerow(asdict(item))
 
 
-def md_escape(value) -> str:
-    return str(value).replace("|", r"\|").replace("\n", " ")
-
-
 def sort_key(row: FileMatch):
     return (
         CATEGORY_PRIORITY.get(row.category, 999),
@@ -343,10 +341,10 @@ def write_result_table(fh, rows: list[FileMatch]) -> None:
     fh.write("|---|---:|---:|---:|---:|---|\n")
     for row in rows:
         fh.write(
-            f"| {md_escape(row.category)} | {row.match_count:,} | "
+            f"| {bl.md_escape(row.category)} | {row.match_count:,} | "
             f"{row.matching_lines:,} | {row.first_match_line or ''} | "
             f"{row.last_match_line or ''} | "
-            f"`{md_escape(row.relative_path)}` |\n"
+            f"`{bl.md_escape(row.relative_path)}` |\n"
         )
 
 
@@ -381,7 +379,7 @@ def write_markdown(
             high_value = [row for row in rows if row.category != "metrics"]
             telemetry = [row for row in rows if row.category == "metrics"]
 
-            fh.write(f"## `{md_escape(identifier)}`\n\n")
+            fh.write(f"## `{bl.md_escape(identifier)}`\n\n")
             fh.write(f"- Total occurrences: **{total_matches:,}**\n")
             fh.write(f"- Matching files: **{len(rows):,}**\n")
             fh.write(f"- High-value/non-metric files: **{len(high_value):,}**\n")
@@ -419,8 +417,8 @@ def write_markdown(
                     continue
 
                 fh.write(
-                    f"**[{md_escape(row.category)}] "
-                    f"`{md_escape(row.relative_path)}`**\n\n"
+                    f"**[{bl.md_escape(row.category)}] "
+                    f"`{bl.md_escape(row.relative_path)}`**\n\n"
                 )
 
                 for sample in file_samples:
@@ -428,7 +426,7 @@ def write_markdown(
                         f"- line {sample.line_number}"
                         f" ({sample.occurrences_on_line} occurrence"
                         f"{'' if sample.occurrences_on_line == 1 else 's'} on line): "
-                        f"`{md_escape(sample.sample)}`\n"
+                        f"`{bl.md_escape(sample.sample)}`\n"
                     )
                 fh.write("\n")
 
@@ -439,7 +437,7 @@ def write_markdown(
                 "These are listed for transparency.\n\n"
             )
             for error in errors[:100]:
-                fh.write(f"- `{md_escape(error)}`\n")
+                fh.write(f"- `{bl.md_escape(error)}`\n")
             if len(errors) > 100:
                 fh.write(f"- … {len(errors) - 100} additional errors omitted\n")
 

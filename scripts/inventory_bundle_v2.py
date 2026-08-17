@@ -31,16 +31,16 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import os
 import re
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
+
+import _bundlelib as bl
 
 DEFAULT_MAX_SCAN_MB = 50
 DEFAULT_SAMPLE_LINES = 250_000
@@ -69,12 +69,6 @@ ROLE_PATTERNS = [
     ("consul", re.compile(r"consul", re.I)),
     ("vault", re.compile(r"vault", re.I)),
     ("aws", re.compile(r"(cloudtrail|autoscal|asg|ec2)", re.I)),
-]
-
-TIMESTAMP_PATTERNS = [
-    re.compile(r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\b"),
-    re.compile(r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?[+-]\d{2}:\d{2})\b"),
-    re.compile(r"\b(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?)\b"),
 ]
 
 PROFILE_INDEX_RE = re.compile(
@@ -114,15 +108,6 @@ class BundleSummary:
     index_json_entries: Optional[int]
 
 
-def human_size(num_bytes: int) -> str:
-    value = float(num_bytes)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if value < 1024.0 or unit == "TB":
-            return f"{value:.1f} {unit}"
-        value /= 1024.0
-    return f"{num_bytes} B"
-
-
 def classify_kind(path: Path) -> str:
     name = path.name.lower()
     if name.endswith(".tar.gz") or name.endswith(".tar.bz2") or name.endswith(".tar.xz"):
@@ -139,35 +124,6 @@ def classify_kind(path: Path) -> str:
 def detect_role(relative_path: str) -> str:
     matches = [role for role, pattern in ROLE_PATTERNS if pattern.search(relative_path)]
     return ",".join(matches) if matches else "unknown"
-
-
-def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as fh:
-        while True:
-            chunk = fh.read(chunk_size)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def parse_timestamp(text: str) -> Optional[datetime]:
-    try:
-        if text.endswith("Z"):
-            return datetime.fromisoformat(text[:-1] + "+00:00")
-        dt = datetime.fromisoformat(text)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except ValueError:
-        return None
-
-
-def timestamps_in_line(line: str) -> Iterable[str]:
-    for pattern in TIMESTAMP_PATTERNS:
-        for match in pattern.finditer(line):
-            yield match.group(1)
 
 
 def scan_text_file(path: Path, max_scan_bytes: int, max_lines: int):
@@ -189,16 +145,13 @@ def scan_text_file(path: Path, max_scan_bytes: int, max_lines: int):
                 bytes_read += len(line.encode("utf-8", errors="replace"))
                 lines_seen += 1
 
-                for raw_ts in timestamps_in_line(line):
-                    dt = parse_timestamp(raw_ts)
-                    if dt is None:
-                        continue
+                for dt in bl.timestamps_in_text(line):
                     if first_ts_dt is None or dt < first_ts_dt:
                         first_ts_dt = dt
-                        first_ts_raw = raw_ts
+                        first_ts_raw = bl.iso(dt)
                     if last_ts_dt is None or dt > last_ts_dt:
                         last_ts_dt = dt
-                        last_ts_raw = raw_ts
+                        last_ts_raw = bl.iso(dt)
 
                 if lines_seen >= max_lines:
                     hit_line_limit = True
@@ -214,7 +167,7 @@ def scan_text_file(path: Path, max_scan_bytes: int, max_lines: int):
 
     reasons = []
     if bounded:
-        reasons.append(f"byte_limit={human_size(max_scan_bytes)}")
+        reasons.append(f"byte_limit={bl.human_size(max_scan_bytes)}")
     if hit_line_limit:
         reasons.append(f"line_limit={max_lines}")
     return None, first_ts_raw, last_ts_raw, "partial_scan:" + ",".join(reasons or ["bounded"])
@@ -227,7 +180,7 @@ def inventory_file(path: Path, root: Path, max_scan_bytes: int, max_lines: int) 
     role = detect_role("/" + rel)
 
     try:
-        digest = sha256_file(path)
+        digest = bl.sha256_file(path)
     except OSError:
         digest = "ERROR"
 
@@ -244,7 +197,7 @@ def inventory_file(path: Path, root: Path, max_scan_bytes: int, max_lines: int) 
     return FileRecord(
         relative_path=rel,
         size_bytes=size,
-        size_human=human_size(size),
+        size_human=bl.human_size(size),
         extension=path.suffix.lower() or "(none)",
         kind=kind,
         likely_role=role,
@@ -265,40 +218,6 @@ def numeric_gaps(ids: list[str]) -> list[str]:
     return [f"{n:0{width}d}" for n in range(nums[0], nums[-1] + 1) if n not in present]
 
 
-def find_bundle_root(root: Path) -> Optional[Path]:
-    """
-    Accept either:
-      ./nomad-debug-2026-...
-    or a parent containing exactly one nomad-debug-* directory.
-    """
-    if (
-        (root / "cluster").is_dir()
-        and (root / "interval").is_dir()
-        and (root / "server").is_dir()
-        and (root / "client").is_dir()
-    ):
-        return root
-
-    candidates = []
-    try:
-        for child in root.iterdir():
-            if not child.is_dir():
-                continue
-            if (
-                (child / "cluster").is_dir()
-                and (child / "interval").is_dir()
-                and (child / "server").is_dir()
-                and (child / "client").is_dir()
-            ):
-                candidates.append(child)
-    except OSError:
-        return None
-
-    if len(candidates) == 1:
-        return candidates[0]
-    return None
-
-
 def collect_profile_ids(entity_dir: Path) -> list[str]:
     ids = set()
     try:
@@ -314,7 +233,7 @@ def collect_profile_ids(entity_dir: Path) -> list[str]:
 
 
 def inspect_nomad_bundle(root: Path) -> BundleSummary:
-    bundle_root = find_bundle_root(root)
+    bundle_root = bl.find_bundle_root(root)
     if bundle_root is None:
         return BundleSummary(
             detected=False,
@@ -415,12 +334,6 @@ def write_csv(records, output_path: Path):
             writer.writerow(asdict(record))
 
 
-def md_escape(value):
-    if value is None:
-        return ""
-    return str(value).replace("|", r"\|").replace("\n", " ")
-
-
 def summarize_profile_capture(ids: list[str]) -> str:
     if not ids:
         return "none detected"
@@ -457,7 +370,7 @@ def write_markdown(
         fh.write("# Nomad Bundle Inventory\n\n")
         fh.write(f"- Inventory root: `{root}`\n")
         fh.write(f"- Files: **{len(records):,}**\n")
-        fh.write(f"- Total size: **{human_size(total_bytes)}**\n")
+        fh.write(f"- Total size: **{bl.human_size(total_bytes)}**\n")
         fh.write(f"- Text-like files: **{len(text_files):,}**\n")
         fh.write(f"- Files with detected timestamps: **{len(with_timestamps):,}**\n\n")
 
@@ -497,7 +410,7 @@ def write_markdown(
             total_intervals = len(bundle.interval_ids)
             for name in bundle.interval_artifacts:
                 count = bundle.interval_artifact_presence.get(name, 0)
-                fh.write(f"| `{md_escape(name)}` | {count} | {total_intervals} |\n")
+                fh.write(f"| `{bl.md_escape(name)}` | {count} | {total_intervals} |\n")
 
             fh.write("\n### Server Profiling Captures\n\n")
             if bundle.servers:
@@ -525,13 +438,13 @@ def write_markdown(
         fh.write("## File Kinds\n\n")
         fh.write("| Kind | Count |\n|---|---:|\n")
         for kind, count in kind_counts.most_common():
-            fh.write(f"| {md_escape(kind)} | {count:,} |\n")
+            fh.write(f"| {bl.md_escape(kind)} | {count:,} |\n")
 
         fh.write("\n## Likely Roles\n\n")
         fh.write("| Role | Matching Files |\n|---|---:|\n")
         if role_counts:
             for role, count in role_counts.most_common():
-                fh.write(f"| {md_escape(role)} | {count:,} |\n")
+                fh.write(f"| {bl.md_escape(role)} | {count:,} |\n")
         else:
             fh.write("| No recognized roles | 0 |\n")
 
@@ -539,16 +452,16 @@ def write_markdown(
         fh.write("| Size | Kind | Role | Path |\n|---:|---|---|---|\n")
         for r in largest:
             fh.write(
-                f"| {r.size_human} | {md_escape(r.kind)} | "
-                f"{md_escape(r.likely_role)} | `{md_escape(r.relative_path)}` |\n"
+                f"| {r.size_human} | {bl.md_escape(r.kind)} | "
+                f"{bl.md_escape(r.likely_role)} | `{bl.md_escape(r.relative_path)}` |\n"
             )
 
         fh.write("\n## Timestamp Coverage\n\n")
         fh.write("| First Timestamp | Last Timestamp | Scan | Path |\n|---|---|---|---|\n")
         for r in sorted(with_timestamps, key=lambda x: x.relative_path):
             fh.write(
-                f"| {md_escape(r.first_timestamp)} | {md_escape(r.last_timestamp)} | "
-                f"{md_escape(r.scan_status)} | `{md_escape(r.relative_path)}` |\n"
+                f"| {bl.md_escape(r.first_timestamp)} | {bl.md_escape(r.last_timestamp)} | "
+                f"{bl.md_escape(r.scan_status)} | `{bl.md_escape(r.relative_path)}` |\n"
             )
 
         fh.write("\n## Full Inventory\n\n")
@@ -556,9 +469,9 @@ def write_markdown(
         for r in sorted(records, key=lambda x: x.relative_path):
             line_value = f"{r.line_count:,}" if r.line_count is not None else ""
             fh.write(
-                f"| {r.size_human} | {md_escape(r.kind)} | "
-                f"{md_escape(r.likely_role)} | {line_value} | "
-                f"{md_escape(r.scan_status)} | `{md_escape(r.relative_path)}` |\n"
+                f"| {r.size_human} | {bl.md_escape(r.kind)} | "
+                f"{bl.md_escape(r.likely_role)} | {line_value} | "
+                f"{bl.md_escape(r.scan_status)} | `{bl.md_escape(r.relative_path)}` |\n"
             )
 
 
@@ -700,7 +613,7 @@ def main():
     print()
     print("Done.")
     print(f"  Files inventoried : {len(records):,}")
-    print(f"  Total source size : {human_size(total_size)}")
+    print(f"  Total source size : {bl.human_size(total_size)}")
     print(f"  CSV               : {csv_path}")
     print(f"  Markdown          : {md_path}")
     print(f"  Bundle summary    : {bundle_json_path}")

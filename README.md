@@ -31,6 +31,11 @@ jumptoolkit/
 | `alloc_lineage_v2.py` | Trace allocation predecessor/replacement lineage using captured `PreviousAllocation`, `NextAllocation`, and `RescheduleTracker` evidence. |
 | `eval_trace.py` | Trace evaluation relationships using `PreviousEval`, `NextEval`, and `BlockedEval`, and associate allocations through `EvalID`. |
 
+`_bundlelib.py` is a shared internal module (bundle-root detection, timestamp
+parsing, eventstream iteration, and similar helpers) used by all seven
+scripts above. It is not a standalone tool and has no CLI of its own; keep it
+next to the scripts when copying the toolkit to a jump box.
+
 ## Quick Start
 
 From the project root:

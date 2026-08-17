@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import os
 import re
@@ -53,8 +52,10 @@ from collections import Counter
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+import _bundlelib as bl
 
 DEFAULT_SCAN_MB = 8
 DEFAULT_PROGRESS_EVERY = 100
@@ -74,27 +75,6 @@ PROFILE_TEXT_RE = re.compile(
     r"^(?:goroutine-debug1|goroutine-debug2)_\d{4}\.txt$"
 )
 
-TIMESTAMP_PATTERNS = [
-    # 2026-08-14T17:18:10Z
-    re.compile(r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\b"),
-
-    # 2026-08-14T17:18:10-07:00
-    re.compile(r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?[+-]\d{2}:\d{2})\b"),
-
-    # Nomad monitor.log:
-    # 2026-08-14T10:18:17.883-0700
-    re.compile(r"\b(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?[+-]\d{4})\b"),
-
-    # 2026-08-14 17:18:10 +0000 UTC
-    re.compile(r"\b(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) ([+-]\d{4}) UTC\b"),
-
-    # Naive timestamp occurring inside source data. We interpret source-naive
-    # timestamps as UTC only for extraction compatibility; user-supplied
-    # --start/--end still require an explicit timezone or --assume-tz.
-    re.compile(r"\b(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d+)?)\b"),
-]
-
-
 @dataclass
 class ManifestRow:
     action: str
@@ -107,114 +87,6 @@ class ManifestRow:
     detected_first_timestamp: str
     detected_last_timestamp: str
     note: str
-
-
-def human_size(num_bytes: int) -> str:
-    value = float(num_bytes)
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if value < 1024.0 or unit == "TB":
-            return f"{value:.1f} {unit}"
-        value /= 1024.0
-    return f"{num_bytes} B"
-
-
-def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as fh:
-        while True:
-            chunk = fh.read(chunk_size)
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def parse_user_datetime(value: str, assume_tz: Optional[ZoneInfo]) -> datetime:
-    raw = value.strip()
-
-    try:
-        if raw.endswith("Z"):
-            dt = datetime.fromisoformat(raw[:-1] + "+00:00")
-        else:
-            dt = datetime.fromisoformat(raw)
-    except ValueError as exc:
-        raise ValueError(
-            f"invalid datetime '{value}'. Use ISO 8601, e.g. "
-            "2026-08-14T17:18:30Z or 2026-08-14T10:18:30-07:00"
-        ) from exc
-
-    if dt.tzinfo is None:
-        if assume_tz is None:
-            raise ValueError(
-                f"datetime '{value}' has no timezone. Supply an offset/Z or use --assume-tz."
-            )
-        dt = dt.replace(tzinfo=assume_tz)
-
-    return dt.astimezone(timezone.utc)
-
-
-def normalize_offset_no_colon(raw: str) -> str:
-    """
-    Convert trailing -0700/+0000 to -07:00/+00:00 for datetime.fromisoformat().
-    """
-    m = re.search(r"([+-])(\d{2})(\d{2})$", raw)
-    if not m:
-        return raw
-    return raw[:m.start()] + f"{m.group(1)}{m.group(2)}:{m.group(3)}"
-
-
-def parse_timestamp_text(raw: str, default_tz: timezone = timezone.utc) -> Optional[datetime]:
-    raw = raw.strip()
-
-    # "2026-08-14 17:18:10 +0000 UTC"
-    m = re.fullmatch(
-        r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?) ([+-]\d{4}) UTC",
-        raw,
-    )
-    if m:
-        base, offset = m.groups()
-        offset_colon = offset[:3] + ":" + offset[3:]
-        try:
-            return datetime.fromisoformat(base + offset_colon).astimezone(timezone.utc)
-        except ValueError:
-            return None
-
-    try:
-        if raw.endswith("Z"):
-            return datetime.fromisoformat(raw[:-1] + "+00:00").astimezone(timezone.utc)
-
-        normalized = normalize_offset_no_colon(raw)
-        dt = datetime.fromisoformat(normalized)
-
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=default_tz)
-
-        return dt.astimezone(timezone.utc)
-
-    except ValueError:
-        return None
-
-
-def timestamps_in_text(text: str) -> Iterable[datetime]:
-    seen = set()
-
-    for pattern in TIMESTAMP_PATTERNS:
-        for match in pattern.finditer(text):
-            if len(match.groups()) == 2:
-                raw = f"{match.group(1)} {match.group(2)} UTC"
-            else:
-                raw = match.group(1)
-
-            dt = parse_timestamp_text(raw)
-            if dt is None:
-                continue
-
-            key = dt.isoformat()
-            if key in seen:
-                continue
-
-            seen.add(key)
-            yield dt
 
 
 def timestamp_bounds_in_file(
@@ -230,7 +102,7 @@ def timestamp_bounds_in_file(
             for line in fh:
                 read_bytes += len(line.encode("utf-8", errors="replace"))
 
-                for dt in timestamps_in_text(line):
+                for dt in bl.timestamps_in_text(line):
                     if first is None or dt < first:
                         first = dt
                     if last is None or dt > last:
@@ -248,36 +120,6 @@ def timestamp_bounds_in_file(
 def first_timestamp_from_file(path: Path, max_scan_bytes: int) -> Optional[datetime]:
     first, _ = timestamp_bounds_in_file(path, max_scan_bytes)
     return first
-
-
-def find_bundle_root(root: Path) -> Optional[Path]:
-    if (
-        (root / "cluster").is_dir()
-        and (root / "interval").is_dir()
-        and (root / "server").is_dir()
-        and (root / "client").is_dir()
-    ):
-        return root
-
-    candidates = []
-
-    try:
-        for child in root.iterdir():
-            if not child.is_dir():
-                continue
-
-            if (
-                (child / "cluster").is_dir()
-                and (child / "interval").is_dir()
-                and (child / "server").is_dir()
-                and (child / "client").is_dir()
-            ):
-                candidates.append(child)
-
-    except OSError:
-        return None
-
-    return candidates[0] if len(candidates) == 1 else None
 
 
 def interval_timestamp(
@@ -318,12 +160,6 @@ def interval_timestamp(
     return None, ""
 
 
-def iso(dt: Optional[datetime]) -> str:
-    if dt is None:
-        return ""
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
 def window_slug(start: datetime, end: datetime) -> str:
     return (
         start.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -347,8 +183,8 @@ def copy_file_with_manifest(
         relative_path=relative_path,
         source_size_bytes=source.stat().st_size,
         output_size_bytes=destination.stat().st_size,
-        source_sha256=sha256_file(source),
-        output_sha256=sha256_file(destination),
+        source_sha256=bl.sha256_file(source),
+        output_sha256=bl.sha256_file(destination),
         matched_lines=0,
         detected_first_timestamp="",
         detected_last_timestamp="",
@@ -374,7 +210,7 @@ def extract_timestamped_lines(
              destination.open("w", encoding="utf-8") as dst:
 
             for line in src:
-                timestamps = list(timestamps_in_text(line))
+                timestamps = bl.timestamps_in_text(line)
                 if not timestamps:
                     continue
 
@@ -413,11 +249,11 @@ def extract_timestamped_lines(
         relative_path=relative_path,
         source_size_bytes=source.stat().st_size,
         output_size_bytes=destination.stat().st_size,
-        source_sha256=sha256_file(source),
-        output_sha256=sha256_file(destination),
+        source_sha256=bl.sha256_file(source),
+        output_sha256=bl.sha256_file(destination),
         matched_lines=matched_lines,
-        detected_first_timestamp=iso(first_seen),
-        detected_last_timestamp=iso(last_seen),
+        detected_first_timestamp=bl.iso(first_seen),
+        detected_last_timestamp=bl.iso(last_seen),
         note="complete source lines with timestamps inside requested window",
     )
 
@@ -443,10 +279,6 @@ def write_manifest_csv(rows: list[ManifestRow], path: Path) -> None:
             writer.writerow(asdict(row))
 
 
-def md_escape(value: object) -> str:
-    return str(value).replace("|", r"\|").replace("\n", " ")
-
-
 def write_summary_md(
     path: Path,
     root: Path,
@@ -465,13 +297,13 @@ def write_summary_md(
         fh.write("# Extracted Incident Window\n\n")
         fh.write(f"- Search root: `{root}`\n")
         fh.write(f"- Nomad bundle root: `{bundle_root or 'not detected'}`\n")
-        fh.write(f"- Requested start (UTC): **{iso(start)}**\n")
-        fh.write(f"- Requested end (UTC): **{iso(end)}**\n")
+        fh.write(f"- Requested start (UTC): **{bl.iso(start)}**\n")
+        fh.write(f"- Requested end (UTC): **{bl.iso(end)}**\n")
         fh.write(f"- Selected interval captures: **{len(selected_intervals)}**\n")
         fh.write(f"- Unparsed interval captures: **{len(unparsed_intervals)}**\n")
         fh.write(f"- Manifest rows: **{len(rows)}**\n")
-        fh.write(f"- Source bytes represented: **{human_size(source_bytes)}**\n")
-        fh.write(f"- Derived output size: **{human_size(output_bytes)}**\n\n")
+        fh.write(f"- Source bytes represented: **{bl.human_size(source_bytes)}**\n")
+        fh.write(f"- Derived output size: **{bl.human_size(output_bytes)}**\n\n")
 
         fh.write("## Selected Nomad Intervals\n\n")
 
@@ -481,7 +313,7 @@ def write_summary_md(
 
             for interval_id, dt, source_name in selected_intervals:
                 fh.write(
-                    f"| `{interval_id}` | {iso(dt)} | `{md_escape(source_name)}` |\n"
+                    f"| `{interval_id}` | {bl.iso(dt)} | `{bl.md_escape(source_name)}` |\n"
                 )
         else:
             fh.write("No regular interval snapshots fell inside the requested window.\n")
@@ -494,7 +326,7 @@ def write_summary_md(
         fh.write("\n## Derived File Actions\n\n")
         fh.write("| Action | Files |\n|---|---:|\n")
         for action, count in action_counts.most_common():
-            fh.write(f"| {md_escape(action)} | {count:,} |\n")
+            fh.write(f"| {bl.md_escape(action)} | {count:,} |\n")
 
         fh.write("\n## Extracted Files\n\n")
         fh.write("| Action | Output Size | Matching Lines | Path | Note |\n")
@@ -502,9 +334,9 @@ def write_summary_md(
 
         for row in sorted(rows, key=lambda r: (r.action, r.relative_path)):
             fh.write(
-                f"| {md_escape(row.action)} | {human_size(row.output_size_bytes)} | "
-                f"{row.matched_lines:,} | `{md_escape(row.relative_path)}` | "
-                f"{md_escape(row.note)} |\n"
+                f"| {bl.md_escape(row.action)} | {bl.human_size(row.output_size_bytes)} | "
+                f"{row.matched_lines:,} | `{bl.md_escape(row.relative_path)}` | "
+                f"{bl.md_escape(row.note)} |\n"
             )
 
 
@@ -522,13 +354,13 @@ def write_summary_json(
         "search_root": str(root),
         "bundle_root": str(bundle_root) if bundle_root else None,
         "requested_window": {
-            "start_utc": iso(start),
-            "end_utc": iso(end),
+            "start_utc": bl.iso(start),
+            "end_utc": bl.iso(end),
         },
         "selected_intervals": [
             {
                 "interval_id": interval_id,
-                "capture_timestamp_utc": iso(dt),
+                "capture_timestamp_utc": bl.iso(dt),
                 "timestamp_source": source_name,
             }
             for interval_id, dt, source_name in selected_intervals
@@ -652,8 +484,8 @@ def main() -> int:
             return 2
 
     try:
-        start = parse_user_datetime(args.start, assume_tz)
-        end = parse_user_datetime(args.end, assume_tz)
+        start = bl.parse_user_dt(args.start, assume_tz)
+        end = bl.parse_user_dt(args.end, assume_tz)
 
     except ValueError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -685,12 +517,12 @@ def main() -> int:
     extracted_root = run_dir / "extracted"
     extracted_root.mkdir(parents=True, exist_ok=True)
 
-    bundle_root = find_bundle_root(root)
+    bundle_root = bl.find_bundle_root(root)
     max_scan_bytes = args.max_scan_mb * 1024 * 1024
 
     print(f"Search root      : {root}")
-    print(f"Start (UTC)      : {iso(start)}")
-    print(f"End (UTC)        : {iso(end)}")
+    print(f"Start (UTC)      : {bl.iso(start)}")
+    print(f"End (UTC)        : {bl.iso(end)}")
     print(f"Bundle detected  : {'yes' if bundle_root else 'no'}")
     print(f"Output directory : {run_dir}")
     print("Source artifacts are opened read-only.")
@@ -736,7 +568,7 @@ def main() -> int:
                         destination=dest,
                         relative_path=str(rel),
                         action="copied_interval_snapshot",
-                        note=f"interval {interval_dir.name} capture at {iso(dt)}",
+                        note=f"interval {interval_dir.name} capture at {bl.iso(dt)}",
                     )
                 )
 

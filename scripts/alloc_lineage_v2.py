@@ -43,9 +43,9 @@ import shutil
 import sys
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+
+import _bundlelib as bl
 
 
 UUID_RE = re.compile(
@@ -67,201 +67,51 @@ class Relationship:
     reschedule_time_utc: str = ""
 
 
-def iso(dt: Optional[datetime]) -> str:
-    if dt is None:
-        return ""
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def unixish_to_dt(value: Any) -> Optional[datetime]:
-    if value is None:
-        return None
-
-    if isinstance(value, str):
-        try:
-            value = int(value)
-        except ValueError:
-            try:
-                raw = value[:-1] + "+00:00" if value.endswith("Z") else value
-                dt = datetime.fromisoformat(raw)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt.astimezone(timezone.utc)
-            except ValueError:
-                return None
-
-    if not isinstance(value, (int, float)):
-        return None
-
-    num = float(value)
-
-    try:
-        if num > 1e17:
-            return datetime.fromtimestamp(num / 1e9, tz=timezone.utc)
-        if num > 1e14:
-            return datetime.fromtimestamp(num / 1e6, tz=timezone.utc)
-        if num > 1e11:
-            return datetime.fromtimestamp(num / 1e3, tz=timezone.utc)
-        if num > 1e9:
-            return datetime.fromtimestamp(num, tz=timezone.utc)
-    except (ValueError, OSError, OverflowError):
-        return None
-
-    return None
-
-
-def find_bundle_root(root: Path) -> Optional[Path]:
-    required = ("cluster", "interval", "server", "client")
-
-    if all((root / name).is_dir() for name in required):
-        return root
-
-    candidates = []
-
-    try:
-        for child in root.iterdir():
-            if child.is_dir() and all((child / name).is_dir() for name in required):
-                candidates.append(child)
-    except OSError:
-        return None
-
-    return candidates[0] if len(candidates) == 1 else None
-
-
-def first_value(d: dict, keys: Iterable[str]) -> Any:
-    for key in keys:
-        if key in d:
-            return d[key]
-    return None
-
-
-def expand_json_value(value: Any) -> list[dict]:
-    if isinstance(value, list):
-        return [x for x in value if isinstance(x, dict)]
-
-    if isinstance(value, dict):
-        for key in ("Allocations", "Items"):
-            if isinstance(value.get(key), list):
-                return [x for x in value[key] if isinstance(x, dict)]
-
-        if first_value(value, ("ID", "AllocID", "AllocationID")):
-            return [value]
-
-    return []
-
-
-def read_allocation_records(path: Path) -> tuple[list[dict], str]:
-    """
-    Return (records, parse_mode).
-
-    parse_mode:
-      empty
-      json
-      json-lines
-      unparseable
-    """
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return [], "unparseable"
-
-    if not text.strip():
-        return [], "empty"
-
-    try:
-        value = json.loads(text)
-        return expand_json_value(value), "json"
-    except json.JSONDecodeError:
-        pass
-
-    records = []
-    parsed_any = False
-
-    for line in text.splitlines():
-        line = line.strip()
-
-        if not line:
-            continue
-
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        parsed_any = True
-        records.extend(expand_json_value(value))
-
-    if parsed_any:
-        return records, "json-lines"
-
-    return [], "unparseable"
+ALLOC_WRAPPER_KEYS = ("Allocations", "Items")
+ALLOC_ID_KEYS = ("ID", "AllocID", "AllocationID")
 
 
 def summarize_allocation(record: dict) -> dict:
     job = record.get("Job")
 
-    job_id = first_value(record, ("JobID",))
-    namespace = first_value(record, ("Namespace",))
+    job_id = bl.first_value(record, ("JobID",))
+    namespace = bl.first_value(record, ("Namespace",))
 
     if isinstance(job, dict):
-        job_id = job_id or first_value(job, ("ID", "Name"))
-        namespace = namespace or first_value(job, ("Namespace",))
+        job_id = job_id or bl.first_value(job, ("ID", "Name"))
+        namespace = namespace or bl.first_value(job, ("Namespace",))
 
-    create_dt = unixish_to_dt(
-        first_value(record, ("CreateTime", "CreateTimestamp", "CreatedAt"))
+    create_dt = bl.unixish_to_dt(
+        bl.first_value(record, ("CreateTime", "CreateTimestamp", "CreatedAt"))
     )
-    modify_dt = unixish_to_dt(
-        first_value(record, ("ModifyTime", "ModifyTimestamp", "UpdatedAt"))
+    modify_dt = bl.unixish_to_dt(
+        bl.first_value(record, ("ModifyTime", "ModifyTimestamp", "UpdatedAt"))
     )
 
     return {
-        "id": str(first_value(record, ("ID", "AllocID", "AllocationID")) or ""),
+        "id": str(bl.first_value(record, ("ID", "AllocID", "AllocationID")) or ""),
         "job_id": job_id,
         "namespace": namespace,
-        "task_group": first_value(record, ("TaskGroup", "TaskGroupName")),
-        "node_id": first_value(record, ("NodeID",)),
-        "node_name": first_value(record, ("NodeName",)),
-        "eval_id": first_value(record, ("EvalID",)),
-        "deployment_id": first_value(record, ("DeploymentID",)),
-        "desired_status": first_value(record, ("DesiredStatus",)),
-        "client_status": first_value(record, ("ClientStatus",)),
-        "previous_allocation": first_value(
+        "task_group": bl.first_value(record, ("TaskGroup", "TaskGroupName")),
+        "node_id": bl.first_value(record, ("NodeID",)),
+        "node_name": bl.first_value(record, ("NodeName",)),
+        "eval_id": bl.first_value(record, ("EvalID",)),
+        "deployment_id": bl.first_value(record, ("DeploymentID",)),
+        "desired_status": bl.first_value(record, ("DesiredStatus",)),
+        "client_status": bl.first_value(record, ("ClientStatus",)),
+        "previous_allocation": bl.first_value(
             record, ("PreviousAllocation", "PreviousAllocID")
         ),
-        "next_allocation": first_value(
+        "next_allocation": bl.first_value(
             record, ("NextAllocation", "NextAllocID")
         ),
-        "create_time_utc": iso(create_dt),
-        "modify_time_utc": iso(modify_dt),
-        "client_description": first_value(record, ("ClientDescription",)),
-        "desired_description": first_value(record, ("DesiredDescription",)),
+        "create_time_utc": bl.iso(create_dt),
+        "modify_time_utc": bl.iso(modify_dt),
+        "client_description": bl.first_value(record, ("ClientDescription",)),
+        "desired_description": bl.first_value(record, ("DesiredDescription",)),
         "reschedule_tracker": record.get("RescheduleTracker"),
         "desired_transition": record.get("DesiredTransition"),
     }
-
-
-def merge_allocation(existing: dict, incoming: dict, source_file: str, interval_id: str) -> dict:
-    if not existing:
-        result = dict(incoming)
-        result["first_seen_interval"] = interval_id
-        result["last_seen_interval"] = interval_id
-        result["sources"] = [source_file]
-        return result
-
-    result = dict(existing)
-
-    for key, value in incoming.items():
-        if value not in (None, "", [], {}):
-            result[key] = value
-
-    result["last_seen_interval"] = interval_id
-
-    sources = list(result.get("sources", []))
-    if source_file not in sources:
-        sources.append(source_file)
-
-    result["sources"] = sources
-    return result
 
 
 def collect_interval_allocations(
@@ -296,7 +146,7 @@ def collect_interval_allocations(
 
         stats["allocation_files"] += 1
 
-        records, mode = read_allocation_records(path)
+        records, mode = bl.read_records(path, ALLOC_WRAPPER_KEYS, ALLOC_ID_KEYS)
 
         if mode == "empty":
             stats["empty_files"] += 1
@@ -316,7 +166,7 @@ def collect_interval_allocations(
             if not alloc_id:
                 continue
 
-            allocations[alloc_id] = merge_allocation(
+            allocations[alloc_id] = bl.merge_record(
                 allocations.get(alloc_id, {}),
                 summary,
                 str(path.relative_to(root)),
@@ -338,46 +188,6 @@ def collect_interval_allocations(
     return allocations, stats
 
 
-def iter_eventstream(path: Path):
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return
-
-    if not text.strip():
-        return
-
-    try:
-        value = json.loads(text)
-
-        if isinstance(value, list):
-            for idx, item in enumerate(value, 1):
-                if isinstance(item, dict):
-                    yield idx, item
-            return
-
-        if isinstance(value, dict):
-            yield 1, value
-            return
-
-    except json.JSONDecodeError:
-        pass
-
-    for line_no, line in enumerate(text.splitlines(), 1):
-        line = line.strip()
-
-        if not line:
-            continue
-
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        if isinstance(item, dict):
-            yield line_no, item
-
-
 def collect_eventstream_allocations(
     bundle_root: Path,
     root: Path,
@@ -392,7 +202,7 @@ def collect_eventstream_allocations(
 
     matched = 0
 
-    for line_no, record in iter_eventstream(path):
+    for line_no, record in bl.iter_eventstream_records(path):
         payload = record.get("Payload")
 
         if not isinstance(payload, dict):
@@ -522,7 +332,7 @@ def build_relationships(
                     if not isinstance(previous_id, str) or not previous_id:
                         continue
 
-                    reschedule_dt = unixish_to_dt(event.get("RescheduleTime"))
+                    reschedule_dt = bl.unixish_to_dt(event.get("RescheduleTime"))
 
                     add_edge(
                         relationships,
@@ -541,116 +351,11 @@ def build_relationships(
                                 f"previous allocation {previous_id}"
                             ),
                             previous_node_id=str(event.get("PrevNodeID") or ""),
-                            reschedule_time_utc=iso(reschedule_dt),
+                            reschedule_time_utc=bl.iso(reschedule_dt),
                         ),
                     )
 
     return relationships, successors, predecessors
-
-
-def discover_connected(
-    seed: str,
-    successors: dict[str, set[str]],
-    predecessors: dict[str, set[str]],
-    max_depth: int,
-) -> tuple[set[str], dict[str, int]]:
-    discovered = {seed}
-    depth_map = {seed: 0}
-    queue = [(seed, 0)]
-
-    while queue:
-        current, depth = queue.pop(0)
-
-        if depth >= max_depth:
-            continue
-
-        neighbors = set(successors.get(current, set()))
-        neighbors.update(predecessors.get(current, set()))
-
-        for neighbor in sorted(neighbors):
-            if neighbor in discovered:
-                continue
-
-            discovered.add(neighbor)
-            depth_map[neighbor] = depth + 1
-            queue.append((neighbor, depth + 1))
-
-    return discovered, depth_map
-
-
-def detect_cycles(nodes: set[str], successors: dict[str, set[str]]) -> list[list[str]]:
-    cycles = []
-    visiting = set()
-    visited = set()
-    stack = []
-
-    def dfs(node: str):
-        if node in visiting:
-            if node in stack:
-                idx = stack.index(node)
-                cycles.append(stack[idx:] + [node])
-            return
-
-        if node in visited:
-            return
-
-        visiting.add(node)
-        stack.append(node)
-
-        for nxt in successors.get(node, set()):
-            if nxt in nodes:
-                dfs(nxt)
-
-        stack.pop()
-        visiting.remove(node)
-        visited.add(node)
-
-    for node in sorted(nodes):
-        dfs(node)
-
-    return cycles
-
-
-def canonical_paths(
-    nodes: set[str],
-    successors: dict[str, set[str]],
-    predecessors: dict[str, set[str]],
-    max_paths: int = 50,
-) -> list[list[str]]:
-    roots = [
-        node for node in nodes
-        if not (predecessors.get(node, set()) & nodes)
-    ]
-
-    if not roots:
-        roots = sorted(nodes)
-
-    paths = []
-
-    def walk(node: str, path: list[str], seen: set[str]):
-        if len(paths) >= max_paths:
-            return
-
-        next_nodes = sorted(successors.get(node, set()) & nodes)
-
-        if not next_nodes:
-            paths.append(path + [node])
-            return
-
-        for nxt in next_nodes:
-            if nxt in seen:
-                paths.append(path + [node, nxt])
-                continue
-
-            walk(nxt, path + [node], seen | {nxt})
-
-    for root in sorted(roots):
-        walk(root, [], {root})
-
-        if len(paths) >= max_paths:
-            break
-
-    return paths
 
 
 def allocation_sort_key(record: dict) -> tuple:
@@ -658,14 +363,6 @@ def allocation_sort_key(record: dict) -> tuple:
         record.get("create_time_utc") or "",
         record.get("id") or "",
     )
-
-
-def md_escape(value: Any) -> str:
-    return str(value or "").replace("|", r"\|").replace("\n", " ")
-
-
-def short_id(value: str) -> str:
-    return value[:8] if value else ""
 
 
 def write_csv(
@@ -783,7 +480,7 @@ def write_markdown(
         if paths:
             for idx, chain in enumerate(paths, 1):
                 rendered = " → ".join(
-                    f"`{short_id(node)}`"
+                    f"`{bl.short_id(node)}`"
                     + (" **(seed)**" if node == seed else "")
                     for node in chain
                 )
@@ -811,17 +508,17 @@ def write_markdown(
             nexts = sorted(successors.get(alloc_id, set()) & connected)
 
             fh.write(
-                f"| `{md_escape(alloc_id)}`"
+                f"| `{bl.md_escape(alloc_id)}`"
                 f"{' **seed**' if alloc_id == seed else ''} | "
                 f"{depth_map.get(alloc_id, '')} | "
-                f"{md_escape(record.get('create_time_utc', ''))} | "
-                f"{md_escape(record.get('job_id', ''))} / "
-                f"{md_escape(record.get('task_group', ''))} | "
-                f"`{md_escape(record.get('node_id', ''))}` | "
-                f"{md_escape(record.get('desired_status', ''))} | "
-                f"{md_escape(record.get('client_status', ''))} | "
-                f"{', '.join(f'`{short_id(x)}`' for x in prevs)} | "
-                f"{', '.join(f'`{short_id(x)}`' for x in nexts)} |\n"
+                f"{bl.md_escape(record.get('create_time_utc', ''))} | "
+                f"{bl.md_escape(record.get('job_id', ''))} / "
+                f"{bl.md_escape(record.get('task_group', ''))} | "
+                f"`{bl.md_escape(record.get('node_id', ''))}` | "
+                f"{bl.md_escape(record.get('desired_status', ''))} | "
+                f"{bl.md_escape(record.get('client_status', ''))} | "
+                f"{', '.join(f'`{bl.short_id(x)}`' for x in prevs)} | "
+                f"{', '.join(f'`{bl.short_id(x)}`' for x in nexts)} |\n"
             )
 
         fh.write("\n## Relationships\n\n")
@@ -832,13 +529,13 @@ def write_markdown(
 
         for rel in relationships:
             fh.write(
-                f"| `{md_escape(rel.from_alloc)}` | "
-                f"`{md_escape(rel.to_alloc)}` | "
-                f"{md_escape(rel.relation)} | "
-                f"{md_escape(rel.evidence_strength)} | "
-                f"{md_escape(rel.reschedule_time_utc)} | "
-                f"`{md_escape(rel.previous_node_id)}` | "
-                f"`{md_escape(rel.source_file)}` |\n"
+                f"| `{bl.md_escape(rel.from_alloc)}` | "
+                f"`{bl.md_escape(rel.to_alloc)}` | "
+                f"{bl.md_escape(rel.relation)} | "
+                f"{bl.md_escape(rel.evidence_strength)} | "
+                f"{bl.md_escape(rel.reschedule_time_utc)} | "
+                f"`{bl.md_escape(rel.previous_node_id)}` | "
+                f"`{bl.md_escape(rel.source_file)}` |\n"
             )
 
         if missing_nodes:
@@ -967,7 +664,7 @@ def main() -> int:
         print("ERROR: --max-depth must be greater than zero.", file=sys.stderr)
         return 2
 
-    bundle_root = find_bundle_root(root)
+    bundle_root = bl.find_bundle_root(root)
 
     if bundle_root is None:
         print("ERROR: standard Nomad operator debug layout not detected.", file=sys.stderr)
@@ -1021,7 +718,7 @@ def main() -> int:
         connected = {args.alloc}
         depth_map = {args.alloc: 0}
     else:
-        connected, depth_map = discover_connected(
+        connected, depth_map = bl.discover_connected(
             args.alloc,
             successors,
             predecessors,
@@ -1038,8 +735,8 @@ def main() -> int:
         if node not in allocations
     }
 
-    cycles = detect_cycles(connected, successors)
-    paths = canonical_paths(
+    cycles = bl.detect_cycles(connected, successors)
+    paths = bl.canonical_paths(
         connected,
         successors,
         predecessors,

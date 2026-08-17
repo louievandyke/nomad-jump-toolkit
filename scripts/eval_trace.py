@@ -54,9 +54,9 @@ import shutil
 import sys
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Optional
+
+import _bundlelib as bl
 
 
 UUID_RE = re.compile(
@@ -75,182 +75,36 @@ class EvalRelationship:
     source_detail: str
 
 
-def first_value(d: dict, keys: Iterable[str]) -> Any:
-    for key in keys:
-        if key in d:
-            return d[key]
-    return None
-
-
-def iso(dt: Optional[datetime]) -> str:
-    if dt is None:
-        return ""
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def unixish_to_dt(value: Any) -> Optional[datetime]:
-    if value is None:
-        return None
-
-    if isinstance(value, str):
-        try:
-            value = int(value)
-        except ValueError:
-            try:
-                raw = value[:-1] + "+00:00" if value.endswith("Z") else value
-                dt = datetime.fromisoformat(raw)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt.astimezone(timezone.utc)
-            except ValueError:
-                return None
-
-    if not isinstance(value, (int, float)):
-        return None
-
-    num = float(value)
-
-    try:
-        if num > 1e17:
-            return datetime.fromtimestamp(num / 1e9, tz=timezone.utc)
-        if num > 1e14:
-            return datetime.fromtimestamp(num / 1e6, tz=timezone.utc)
-        if num > 1e11:
-            return datetime.fromtimestamp(num / 1e3, tz=timezone.utc)
-        if num > 1e9:
-            return datetime.fromtimestamp(num, tz=timezone.utc)
-    except (ValueError, OSError, OverflowError):
-        return None
-
-    return None
-
-
-def find_bundle_root(root: Path) -> Optional[Path]:
-    required = ("cluster", "interval", "server", "client")
-
-    if all((root / name).is_dir() for name in required):
-        return root
-
-    candidates = []
-
-    try:
-        for child in root.iterdir():
-            if child.is_dir() and all((child / name).is_dir() for name in required):
-                candidates.append(child)
-    except OSError:
-        return None
-
-    return candidates[0] if len(candidates) == 1 else None
-
-
-def expand_json_value(value: Any, kind: str) -> list[dict]:
-    if isinstance(value, list):
-        return [x for x in value if isinstance(x, dict)]
-
-    if not isinstance(value, dict):
-        return []
-
-    wrappers = {
-        "evaluation": ("Evaluations", "Items"),
-        "allocation": ("Allocations", "Items"),
-    }
-
-    for key in wrappers[kind]:
-        if isinstance(value.get(key), list):
-            return [x for x in value[key] if isinstance(x, dict)]
-
-    if first_value(value, ("ID", "EvalID", "AllocationID", "AllocID")):
-        return [value]
-
-    return []
-
-
-def read_records(path: Path, kind: str) -> tuple[list[dict], str]:
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return [], "unparseable"
-
-    if not text.strip():
-        return [], "empty"
-
-    try:
-        value = json.loads(text)
-        return expand_json_value(value, kind), "json"
-    except json.JSONDecodeError:
-        pass
-
-    records = []
-    parsed_any = False
-
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-
-        try:
-            value = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        parsed_any = True
-        records.extend(expand_json_value(value, kind))
-
-    if parsed_any:
-        return records, "json-lines"
-
-    return [], "unparseable"
-
-
-def merge_record(existing: dict, incoming: dict, source_file: str, interval_id: str) -> dict:
-    if not existing:
-        out = dict(incoming)
-        out["first_seen_interval"] = interval_id
-        out["last_seen_interval"] = interval_id
-        out["sources"] = [source_file]
-        return out
-
-    out = dict(existing)
-
-    for key, value in incoming.items():
-        if value not in (None, "", [], {}):
-            out[key] = value
-
-    if interval_id:
-        if not out.get("first_seen_interval"):
-            out["first_seen_interval"] = interval_id
-        out["last_seen_interval"] = interval_id
-
-    sources = list(out.get("sources", []))
-    if source_file not in sources:
-        sources.append(source_file)
-    out["sources"] = sources
-
-    return out
+EVAL_WRAPPER_KEYS = ("Evaluations", "Items")
+ALLOC_WRAPPER_KEYS = ("Allocations", "Items")
+# Preserved verbatim from the pre-consolidation version: both kinds accepted
+# a bare single-object document identified by any of these keys, not just
+# the keys specific to that kind.
+RECORD_ID_KEYS = ("ID", "EvalID", "AllocationID", "AllocID")
 
 
 def summarize_eval(record: dict) -> dict:
-    create_dt = unixish_to_dt(first_value(record, ("CreateTime", "CreateTimestamp")))
-    modify_dt = unixish_to_dt(first_value(record, ("ModifyTime", "ModifyTimestamp")))
-    wait_dt = unixish_to_dt(first_value(record, ("WaitUntil",)))
+    create_dt = bl.unixish_to_dt(bl.first_value(record, ("CreateTime", "CreateTimestamp")))
+    modify_dt = bl.unixish_to_dt(bl.first_value(record, ("ModifyTime", "ModifyTimestamp")))
+    wait_dt = bl.unixish_to_dt(bl.first_value(record, ("WaitUntil",)))
 
     return {
-        "id": str(first_value(record, ("ID", "EvalID")) or ""),
-        "namespace": first_value(record, ("Namespace",)),
-        "job_id": first_value(record, ("JobID",)),
-        "node_id": first_value(record, ("NodeID",)),
-        "deployment_id": first_value(record, ("DeploymentID",)),
-        "triggered_by": first_value(record, ("TriggeredBy",)),
-        "status": first_value(record, ("Status",)),
-        "status_description": first_value(record, ("StatusDescription",)),
-        "previous_eval": first_value(record, ("PreviousEval",)),
-        "next_eval": first_value(record, ("NextEval",)),
-        "blocked_eval": first_value(record, ("BlockedEval",)),
-        "create_time_utc": iso(create_dt),
-        "modify_time_utc": iso(modify_dt),
-        "wait_until_utc": iso(wait_dt),
-        "priority": first_value(record, ("Priority",)),
-        "type": first_value(record, ("Type",)),
+        "id": str(bl.first_value(record, ("ID", "EvalID")) or ""),
+        "namespace": bl.first_value(record, ("Namespace",)),
+        "job_id": bl.first_value(record, ("JobID",)),
+        "node_id": bl.first_value(record, ("NodeID",)),
+        "deployment_id": bl.first_value(record, ("DeploymentID",)),
+        "triggered_by": bl.first_value(record, ("TriggeredBy",)),
+        "status": bl.first_value(record, ("Status",)),
+        "status_description": bl.first_value(record, ("StatusDescription",)),
+        "previous_eval": bl.first_value(record, ("PreviousEval",)),
+        "next_eval": bl.first_value(record, ("NextEval",)),
+        "blocked_eval": bl.first_value(record, ("BlockedEval",)),
+        "create_time_utc": bl.iso(create_dt),
+        "modify_time_utc": bl.iso(modify_dt),
+        "wait_until_utc": bl.iso(wait_dt),
+        "priority": bl.first_value(record, ("Priority",)),
+        "type": bl.first_value(record, ("Type",)),
         "failed_tg_allocs": record.get("FailedTGAllocs"),
         "queued_allocations": record.get("QueuedAllocations"),
         "class_eligibility": record.get("ClassEligibility"),
@@ -259,24 +113,24 @@ def summarize_eval(record: dict) -> dict:
 
 
 def summarize_alloc(record: dict) -> dict:
-    create_dt = unixish_to_dt(first_value(record, ("CreateTime", "CreateTimestamp")))
-    modify_dt = unixish_to_dt(first_value(record, ("ModifyTime", "ModifyTimestamp")))
+    create_dt = bl.unixish_to_dt(bl.first_value(record, ("CreateTime", "CreateTimestamp")))
+    modify_dt = bl.unixish_to_dt(bl.first_value(record, ("ModifyTime", "ModifyTimestamp")))
 
     return {
-        "id": str(first_value(record, ("ID", "AllocID", "AllocationID")) or ""),
-        "eval_id": first_value(record, ("EvalID",)),
-        "job_id": first_value(record, ("JobID",)),
-        "namespace": first_value(record, ("Namespace",)),
-        "task_group": first_value(record, ("TaskGroup", "TaskGroupName")),
-        "node_id": first_value(record, ("NodeID",)),
-        "node_name": first_value(record, ("NodeName",)),
-        "deployment_id": first_value(record, ("DeploymentID",)),
-        "desired_status": first_value(record, ("DesiredStatus",)),
-        "client_status": first_value(record, ("ClientStatus",)),
-        "previous_allocation": first_value(record, ("PreviousAllocation",)),
-        "next_allocation": first_value(record, ("NextAllocation",)),
-        "create_time_utc": iso(create_dt),
-        "modify_time_utc": iso(modify_dt),
+        "id": str(bl.first_value(record, ("ID", "AllocID", "AllocationID")) or ""),
+        "eval_id": bl.first_value(record, ("EvalID",)),
+        "job_id": bl.first_value(record, ("JobID",)),
+        "namespace": bl.first_value(record, ("Namespace",)),
+        "task_group": bl.first_value(record, ("TaskGroup", "TaskGroupName")),
+        "node_id": bl.first_value(record, ("NodeID",)),
+        "node_name": bl.first_value(record, ("NodeName",)),
+        "deployment_id": bl.first_value(record, ("DeploymentID",)),
+        "desired_status": bl.first_value(record, ("DesiredStatus",)),
+        "client_status": bl.first_value(record, ("ClientStatus",)),
+        "previous_allocation": bl.first_value(record, ("PreviousAllocation",)),
+        "next_allocation": bl.first_value(record, ("NextAllocation",)),
+        "create_time_utc": bl.iso(create_dt),
+        "modify_time_utc": bl.iso(modify_dt),
     }
 
 
@@ -311,7 +165,7 @@ def collect_interval_data(bundle_root: Path, root: Path):
 
         if eval_path.is_file():
             stats["evaluation_files"] += 1
-            records, mode = read_records(eval_path, "evaluation")
+            records, mode = bl.read_records(eval_path, EVAL_WRAPPER_KEYS, RECORD_ID_KEYS)
 
             if mode == "json-lines":
                 stats["evaluation_json_lines_files"] += 1
@@ -329,7 +183,7 @@ def collect_interval_data(bundle_root: Path, root: Path):
                 if not eval_id:
                     continue
 
-                evaluations[eval_id] = merge_record(
+                evaluations[eval_id] = bl.merge_record(
                     evaluations.get(eval_id, {}),
                     summary,
                     str(eval_path.relative_to(root)),
@@ -340,7 +194,7 @@ def collect_interval_data(bundle_root: Path, root: Path):
 
         if alloc_path.is_file():
             stats["allocation_files"] += 1
-            records, mode = read_records(alloc_path, "allocation")
+            records, mode = bl.read_records(alloc_path, ALLOC_WRAPPER_KEYS, RECORD_ID_KEYS)
 
             if mode == "json-lines":
                 stats["allocation_json_lines_files"] += 1
@@ -358,7 +212,7 @@ def collect_interval_data(bundle_root: Path, root: Path):
                 if not alloc_id:
                     continue
 
-                allocations[alloc_id] = merge_record(
+                allocations[alloc_id] = bl.merge_record(
                     allocations.get(alloc_id, {}),
                     summary,
                     str(alloc_path.relative_to(root)),
@@ -386,45 +240,6 @@ def collect_interval_data(bundle_root: Path, root: Path):
     return evaluations, allocations, stats
 
 
-def iter_eventstream(path: Path):
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return
-
-    if not text.strip():
-        return
-
-    try:
-        value = json.loads(text)
-
-        if isinstance(value, list):
-            for idx, item in enumerate(value, 1):
-                if isinstance(item, dict):
-                    yield idx, item
-            return
-
-        if isinstance(value, dict):
-            yield 1, value
-            return
-
-    except json.JSONDecodeError:
-        pass
-
-    for line_no, line in enumerate(text.splitlines(), 1):
-        line = line.strip()
-        if not line:
-            continue
-
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        if isinstance(item, dict):
-            yield line_no, item
-
-
 def collect_eventstream(bundle_root: Path, root: Path, evaluations: dict, allocations: dict):
     path = bundle_root / "cluster" / "eventstream.json"
 
@@ -435,7 +250,7 @@ def collect_eventstream(bundle_root: Path, root: Path, evaluations: dict, alloca
 
     print("Parsing cluster/eventstream.json...")
 
-    for line_no, record in iter_eventstream(path):
+    for line_no, record in bl.iter_eventstream_records(path):
         payload = record.get("Payload")
         if not isinstance(payload, dict):
             continue
@@ -449,7 +264,7 @@ def collect_eventstream(bundle_root: Path, root: Path, evaluations: dict, alloca
             if eval_id:
                 counts["evaluation"] += 1
                 source = f"{path.relative_to(root)}:{line_no}"
-                evaluations[eval_id] = merge_record(
+                evaluations[eval_id] = bl.merge_record(
                     evaluations.get(eval_id, {}),
                     summary,
                     source,
@@ -465,7 +280,7 @@ def collect_eventstream(bundle_root: Path, root: Path, evaluations: dict, alloca
             if alloc_id:
                 counts["allocation"] += 1
                 source = f"{path.relative_to(root)}:{line_no}"
-                allocations[alloc_id] = merge_record(
+                allocations[alloc_id] = bl.merge_record(
                     allocations.get(alloc_id, {}),
                     summary,
                     source,
@@ -559,100 +374,6 @@ def build_relationships(evaluations: dict[str, dict]):
     return rels, successors, predecessors
 
 
-def discover_connected(seed: str, successors, predecessors, max_depth: int):
-    discovered = {seed}
-    depth_map = {seed: 0}
-    queue = [(seed, 0)]
-
-    while queue:
-        current, depth = queue.pop(0)
-
-        if depth >= max_depth:
-            continue
-
-        neighbors = set(successors.get(current, set()))
-        neighbors.update(predecessors.get(current, set()))
-
-        for neighbor in sorted(neighbors):
-            if neighbor in discovered:
-                continue
-
-            discovered.add(neighbor)
-            depth_map[neighbor] = depth + 1
-            queue.append((neighbor, depth + 1))
-
-    return discovered, depth_map
-
-
-def detect_cycles(nodes: set[str], successors):
-    cycles = []
-    visiting = set()
-    visited = set()
-    stack = []
-
-    def dfs(node):
-        if node in visiting:
-            if node in stack:
-                i = stack.index(node)
-                cycles.append(stack[i:] + [node])
-            return
-
-        if node in visited:
-            return
-
-        visiting.add(node)
-        stack.append(node)
-
-        for nxt in successors.get(node, set()):
-            if nxt in nodes:
-                dfs(nxt)
-
-        stack.pop()
-        visiting.remove(node)
-        visited.add(node)
-
-    for node in sorted(nodes):
-        dfs(node)
-
-    return cycles
-
-
-def canonical_paths(nodes, successors, predecessors, max_paths=50):
-    roots = [
-        node for node in nodes
-        if not (predecessors.get(node, set()) & nodes)
-    ]
-
-    if not roots:
-        roots = sorted(nodes)
-
-    paths = []
-
-    def walk(node, path, seen):
-        if len(paths) >= max_paths:
-            return
-
-        nxts = sorted(successors.get(node, set()) & nodes)
-
-        if not nxts:
-            paths.append(path + [node])
-            return
-
-        for nxt in nxts:
-            if nxt in seen:
-                paths.append(path + [node, nxt])
-                continue
-
-            walk(nxt, path + [node], seen | {nxt})
-
-    for root in sorted(roots):
-        walk(root, [], {root})
-        if len(paths) >= max_paths:
-            break
-
-    return paths
-
-
 def related_allocations(connected_evals: set[str], allocations: dict[str, dict]):
     result = {}
 
@@ -661,14 +382,6 @@ def related_allocations(connected_evals: set[str], allocations: dict[str, dict])
             result[alloc_id] = alloc
 
     return result
-
-
-def short_id(value: str) -> str:
-    return value[:8] if value else ""
-
-
-def md_escape(value: Any) -> str:
-    return str(value or "").replace("|", r"\|").replace("\n", " ")
 
 
 def write_csv(path: Path, connected, evaluations, predecessors, successors, depth_map, allocs_by_eval):
@@ -779,7 +492,7 @@ def write_markdown(
 
         for idx, chain in enumerate(paths, 1):
             rendered = " → ".join(
-                f"`{short_id(x)}`" + (" **seed**" if x == seed_eval else "")
+                f"`{bl.short_id(x)}`" + (" **seed**" if x == seed_eval else "")
                 for x in chain
             )
             fh.write(f"{idx}. {rendered}\n")
@@ -806,17 +519,17 @@ def write_markdown(
             alloc_ids = sorted(allocs_by_eval.get(eval_id, []))
 
             fh.write(
-                f"| `{md_escape(eval_id)}`"
+                f"| `{bl.md_escape(eval_id)}`"
                 f"{' **seed**' if eval_id == seed_eval else ''} | "
                 f"{depth_map.get(eval_id, '')} | "
-                f"{md_escape(record.get('create_time_utc', ''))} | "
-                f"{md_escape(record.get('job_id', ''))} | "
-                f"{md_escape(record.get('triggered_by', ''))} | "
-                f"{md_escape(record.get('status', ''))} | "
-                f"{', '.join(f'`{short_id(x)}`' for x in prevs)} | "
-                f"{', '.join(f'`{short_id(x)}`' for x in nexts)} | "
-                f"{md_escape(record.get('blocked_eval', ''))} | "
-                f"{', '.join(f'`{short_id(x)}`' for x in alloc_ids)} |\n"
+                f"{bl.md_escape(record.get('create_time_utc', ''))} | "
+                f"{bl.md_escape(record.get('job_id', ''))} | "
+                f"{bl.md_escape(record.get('triggered_by', ''))} | "
+                f"{bl.md_escape(record.get('status', ''))} | "
+                f"{', '.join(f'`{bl.short_id(x)}`' for x in prevs)} | "
+                f"{', '.join(f'`{bl.short_id(x)}`' for x in nexts)} | "
+                f"{bl.md_escape(record.get('blocked_eval', ''))} | "
+                f"{', '.join(f'`{bl.short_id(x)}`' for x in alloc_ids)} |\n"
             )
 
         fh.write("\n## Evaluation Relationships\n\n")
@@ -825,11 +538,11 @@ def write_markdown(
 
         for rel in relationships:
             fh.write(
-                f"| `{md_escape(rel.from_eval)}` | "
-                f"`{md_escape(rel.to_eval)}` | "
-                f"{md_escape(rel.relation)} | "
-                f"{md_escape(rel.evidence_strength)} | "
-                f"`{md_escape(rel.source_file)}` |\n"
+                f"| `{bl.md_escape(rel.from_eval)}` | "
+                f"`{bl.md_escape(rel.to_eval)}` | "
+                f"{bl.md_escape(rel.relation)} | "
+                f"{bl.md_escape(rel.evidence_strength)} | "
+                f"`{bl.md_escape(rel.source_file)}` |\n"
             )
 
         fh.write("\n## Related Allocations\n\n")
@@ -847,13 +560,13 @@ def write_markdown(
 
             for alloc in rows:
                 fh.write(
-                    f"| `{md_escape(alloc.get('id'))}` | "
-                    f"`{md_escape(alloc.get('eval_id'))}` | "
-                    f"{md_escape(alloc.get('job_id'))} / {md_escape(alloc.get('task_group'))} | "
-                    f"`{md_escape(alloc.get('node_id'))}` | "
-                    f"{md_escape(alloc.get('desired_status'))} | "
-                    f"{md_escape(alloc.get('client_status'))} | "
-                    f"{md_escape(alloc.get('create_time_utc'))} |\n"
+                    f"| `{bl.md_escape(alloc.get('id'))}` | "
+                    f"`{bl.md_escape(alloc.get('eval_id'))}` | "
+                    f"{bl.md_escape(alloc.get('job_id'))} / {bl.md_escape(alloc.get('task_group'))} | "
+                    f"`{bl.md_escape(alloc.get('node_id'))}` | "
+                    f"{bl.md_escape(alloc.get('desired_status'))} | "
+                    f"{bl.md_escape(alloc.get('client_status'))} | "
+                    f"{bl.md_escape(alloc.get('create_time_utc'))} |\n"
                 )
 
         if missing_evals:
@@ -930,7 +643,7 @@ def main() -> int:
         print("ERROR: --max-depth must be greater than zero.", file=sys.stderr)
         return 2
 
-    bundle_root = find_bundle_root(root)
+    bundle_root = bl.find_bundle_root(root)
 
     if bundle_root is None:
         print("ERROR: standard Nomad operator debug layout not detected.", file=sys.stderr)
@@ -1014,7 +727,7 @@ def main() -> int:
         connected = {seed_eval}
         depth_map = {seed_eval: 0}
     else:
-        connected, depth_map = discover_connected(
+        connected, depth_map = bl.discover_connected(
             seed_eval,
             successors,
             predecessors,
@@ -1039,8 +752,8 @@ def main() -> int:
         if eval_id:
             allocs_by_eval[eval_id].append(alloc_id)
 
-    cycles = detect_cycles(connected, successors)
-    paths = canonical_paths(connected, successors, predecessors)
+    cycles = bl.detect_cycles(connected, successors)
+    paths = bl.canonical_paths(connected, successors, predecessors)
 
     eval_trace_csv = run_dir / "eval_trace.csv"
     eval_trace_md = run_dir / "eval_trace.md"
@@ -1146,7 +859,7 @@ def main() -> int:
     for rel in connected_relationships[:10]:
         print(
             f"    {rel.relation:<16} "
-            f"{short_id(rel.from_eval)} -> {short_id(rel.to_eval)}"
+            f"{bl.short_id(rel.from_eval)} -> {bl.short_id(rel.to_eval)}"
         )
 
     if len(connected_relationships) > 10:

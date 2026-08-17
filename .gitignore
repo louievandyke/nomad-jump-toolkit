@@ -1,0 +1,14 @@
+# OS cruft
+.DS_Store
+
+# Unrelated local tool state (bob shell), not part of this project
+.bob/
+
+# Source bundles: customer-adjacent debug data. Never enters version control,
+# even locally-only history. Treat everything under bundles/ as read-only and
+# out-of-repo per README.md's safety model.
+bundles/
+
+# Generated analysis output: derived, safe to delete/regenerate (README.md).
+# Keeping it out of git keeps diffs meaningful and avoids churn from re-runs.
+analysis/

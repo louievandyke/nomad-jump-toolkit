@@ -218,3 +218,29 @@ Likely future tools include:
 - anomaly scanning
 
 These should follow the same read-only, offline, bounded-output, provenance-first design.
+
+## Known Duplication / Drift
+
+Each validated script currently defines its own copies of common helpers
+(bundle-root detection, timestamp parsing, eventstream iteration,
+Markdown escaping, hashing, etc.) rather than importing a shared module.
+This was a deliberate early tradeoff ("prefer clear standalone scripts
+... until repeated code is stable enough to justify shared modules") but
+the duplication has already caused real drift, not just repetition:
+
+- `find_bundle_root()` exists in all 7 scripts as 4 non-identical
+  implementations (different ambiguous-match handling and iteration
+  style). A bug fixed in one copy will not propagate to the others.
+- `alloc_lineage_v2.py` and `eval_trace.py` each implement their own
+  relationship-graph traversal (`add_edge` / `build_relationships` /
+  `discover_connected` / `detect_cycles` / `canonical_paths`) for
+  chasing lineage/eval chains, and the two implementations have already
+  diverged in behavior, not just formatting.
+
+Before extracting a shared `_bundlelib.py` (or similar), reconcile these
+behavioral differences deliberately — decide which variant is correct
+(or whether the divergence is intentional given alloc vs. eval
+semantics) — rather than silently picking one copy and discarding the
+other's edge-case handling. Follow the normal "Before Starting New Work"
+and "Current Validated Scripts" change process for this, since it
+touches every validated script at once.

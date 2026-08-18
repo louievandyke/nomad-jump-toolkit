@@ -4,6 +4,11 @@
 # Unrelated local tool state (bob shell), not part of this project
 .bob/
 
+# Claude Code: settings.local.json is per-user, not shared. (A future
+# .claude/settings.json or .claude/commands/ meant for the whole team
+# should stay tracked, so only the local-settings file is excluded here.)
+.claude/settings.local.json
+
 # Source bundles: customer-adjacent debug data. Never enters version control,
 # even locally-only history. Treat everything under bundles/ as read-only and
 # out-of-repo per README.md's safety model.

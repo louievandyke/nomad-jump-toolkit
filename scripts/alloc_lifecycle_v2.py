@@ -213,18 +213,31 @@ def collect_snapshots(bundle_root: Path, root: Path, alloc_id: str) -> list[dict
 
     print(f"Inspecting {len(interval_dirs)} interval allocation snapshot(s)...")
 
+    json_lines_files = 0
+    unparseable_files = 0
+
     for interval_dir in interval_dirs:
         path = interval_dir / "allocations.json"
 
         if not path.is_file():
             continue
 
-        try:
-            data = bl.load_json(path)
-        except (OSError, json.JSONDecodeError):
-            continue
+        # Tolerates ordinary JSON as well as JSON-lines/multiple documents
+        # per interval capture (a real, documented bundle shape -- see
+        # AGENTS.md "Known Bundle/Test Characteristics"). A plain
+        # single-document json.load() here previously meant a JSON-lines
+        # allocations.json silently yielded zero matches for every interval.
+        documents, mode = bl.parse_json_documents(path)
 
-        matches = find_alloc_objects(data, alloc_id)
+        if mode == "json-lines":
+            json_lines_files += 1
+        elif mode == "unparseable":
+            unparseable_files += 1
+
+        matches = []
+        for data in documents:
+            matches.extend(find_alloc_objects(data, alloc_id))
+
         if not matches:
             continue
 
@@ -239,6 +252,11 @@ def collect_snapshots(bundle_root: Path, root: Path, alloc_id: str) -> list[dict
                     capture_dt=capture_dt,
                 )
             )
+
+    if json_lines_files:
+        print(f"JSON-lines allocation files : {json_lines_files}")
+    if unparseable_files:
+        print(f"Unparseable allocation files: {unparseable_files}")
 
     snapshots.sort(key=lambda x: int(x["interval_id"]))
     print(f"Allocation present in {len(snapshots)} interval snapshot(s).")

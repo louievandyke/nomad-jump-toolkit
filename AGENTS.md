@@ -315,3 +315,50 @@ copy-paste-and-adapt across seven scripts over time, which is exactly what
 this section warned about before the extraction. See `_bundlelib.py`'s
 module docstring and per-function docstrings for the reconciliation
 rationale on each one.
+
+## Real-World Bundle Validation (2026-08-17)
+
+After the `_bundlelib.py` extraction above, the local bundle corpus grew to
+include three real-world bundles from actual incidents (previously only the
+synthetic `bundles/nomad-debug-test` was present locally). All 7 scripts
+were run against all of them as a regression pass:
+
+- `nomad-debug-2026-01-22-213719Z` — `allocations.json`/`evaluations.json`
+  are JSON-lines in every interval. `eval_trace.py` reproduced a known-good
+  historical result exactly (same resolved eval, same missing
+  `PreviousEval`). `correlate_timeline_v2.py`'s JSON-lines fix (see above)
+  held up on this independent bundle too.
+- `nomad-debug-2026-02-04-153233Z` — `allocations.json` is genuinely
+  zero-byte in every interval; confirmed as the already-documented
+  zero-byte case below, not a defect.
+- `nomad-debug-2026-07-27-214257Z` — ordinary single-JSON format; used as a
+  positive control.
+
+This surfaced one more real defect, not caused by the `_bundlelib.py` work
+(this code path was never touched by that extraction) but caught because a
+JSON-lines bundle finally exercised it:
+
+- **`alloc_lifecycle_v2.py`'s `collect_snapshots()` silently returned zero
+  interval snapshots on JSON-lines bundles.** It parsed each interval's
+  `allocations.json` with a single-document `json.load()` and caught
+  `JSONDecodeError` with a bare `continue` — so for
+  `nomad-debug-2026-01-22-213719Z`, an allocation present in all 12
+  intervals (confirmed via `alloc_lineage_v2.py`/`eval_trace.py`) reported
+  "present in 0 interval snapshot(s)", silently, for every interval. Fixed
+  by adding `_bundlelib.parse_json_documents()` — a JSON/JSON-lines-tolerant
+  parser that returns raw top-level values instead of flattened records,
+  since this script's `find_alloc_objects()` needs to recurse into
+  arbitrary nested structure itself rather than receive normalized records.
+  Verified: 0 → 12 snapshots on the real bundle; unchanged (still
+  byte-identical output) on the single-JSON synthetic test bundle and the
+  July positive-control bundle; still silent-and-correct (not
+  "unparseable") on the genuinely-empty February bundle.
+
+The lesson for future work on this toolkit: a synthetic test bundle and one
+real bundle are not enough to exercise every documented shape in "Known
+Bundle/Test Characteristics" below. Real incident bundles found this defect
+within minutes that the single-bundle test process during the
+`_bundlelib.py` extraction could not have caught, because that extraction's
+only available real-shape bundle (`nomad-debug-test`) happens to use
+single-JSON `allocations.json`, not JSON-lines. Test new/changed parsing
+logic against every distinct bundle shape available, not just one.

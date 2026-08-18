@@ -384,6 +384,57 @@ def iter_eventstream_records(path: Path) -> Iterable[tuple[int, dict]]:
 # Interval snapshot parsing (allocations.json / evaluations.json / etc.)
 # ---------------------------------------------------------------------------
 
+def parse_json_documents(path: Path) -> tuple[list[Any], str]:
+    """
+    Parse a snapshot file into a list of top-level JSON values, tolerating a
+    single ordinary JSON document (object or array) or JSON-lines/multiple
+    JSON documents. Returns (values, parse_mode) where parse_mode is one of:
+    empty | json | json-lines | unparseable.
+
+    Unlike read_records()/expand_json_value() below, this does not flatten
+    wrapper objects or filter to dict-only records: it hands back the raw
+    parsed value(s) as-is. Use this when a caller needs to recurse into
+    arbitrary nested structure itself (e.g. a caller doing its own deep
+    search for an ID at any depth) rather than a normalized flat list of
+    top-level records.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return [], "unparseable"
+
+    if not text.strip():
+        return [], "empty"
+
+    try:
+        value = json.loads(text)
+        return [value], "json"
+    except json.JSONDecodeError:
+        pass
+
+    values = []
+    parsed_any = False
+
+    for line in text.splitlines():
+        line = line.strip()
+
+        if not line:
+            continue
+
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        parsed_any = True
+        values.append(value)
+
+    if parsed_any:
+        return values, "json-lines"
+
+    return [], "unparseable"
+
+
 def expand_json_value(
     value: Any,
     wrapper_keys: Iterable[str],

@@ -1,5 +1,7 @@
 # Nomad Jump Toolkit
 
+[![GitHub repo](https://img.shields.io/badge/GitHub-nomad--jump--toolkit-181717?logo=github)](https://github.com/louievandyke/nomad-jump-toolkit)
+
 Offline, read-only forensic helpers for unpacked `nomad operator debug` bundles.
 
 The toolkit is designed for restricted jump boxes where customer artifacts should remain local. Scripts use Python's standard library where practical, avoid network access, keep terminal output bounded, and write derived analysis separately from source bundles.

@@ -32,6 +32,8 @@ jumptoolkit/
 | `correlate_timeline_v2.py` | Correlate allocation/node/eval identifiers across structured data and monitor logs while suppressing debug-collection noise. |
 | `alloc_lineage_v2.py` | Trace allocation predecessor/replacement lineage using captured `PreviousAllocation`, `NextAllocation`, and `RescheduleTracker` evidence. |
 | `eval_trace.py` | Trace evaluation relationships using `PreviousEval`, `NextEval`, and `BlockedEval`, and associate allocations through `EvalID`. |
+| `case_review.py` | Review exact identifiers from a structured, case-reported investigation brief while keeping case context separate from bundle-derived evidence. |
+| `case_intake.py` | Discover nested debug bundles in a case artifact directory, map adjacent artifacts, and generate bounded next-step commands. |
 
 `_bundlelib.py` is a shared internal module (bundle-root detection, timestamp
 parsing, eventstream iteration, and similar helpers) used by all seven
@@ -46,10 +48,38 @@ From the project root:
 python3 scripts/inventory_bundle_v2.py bundles/<bundle>
 ```
 
-Find an identifier:
+Find an identifier or exact string:
 
 ```bash
-python3 scripts/find_identifiers_v2.py bundles/<bundle>   --id <UUID>
+python3 scripts/find_identifiers_v2.py bundles/<bundle> \
+  --id <IDENTIFIER>
+```
+
+`<IDENTIFIER>` is not limited to a NodeID or even to a UUID. It is the exact
+value you want to locate across the bundle. Common examples include an
+allocation ID, node ID, evaluation ID, deployment ID, job ID/name, namespace,
+hostname, or IP address.
+
+Examples:
+
+```bash
+# Allocation ID
+python3 scripts/find_identifiers_v2.py bundles/<bundle> \
+  --id ee943c77-0149-b085-fad0-de0f30f23c2c
+
+# Node ID
+python3 scripts/find_identifiers_v2.py bundles/<bundle> \
+  --id 027c010c-e769-eb1b-2ebe-a4b819fcbbd4
+
+# Evaluation ID
+python3 scripts/find_identifiers_v2.py bundles/<bundle> \
+  --id ced8afab-16e4-87ce-2f01-e297b45ba3c3
+
+# Search several related identifiers in one pass
+python3 scripts/find_identifiers_v2.py bundles/<bundle> \
+  --id ee943c77-0149-b085-fad0-de0f30f23c2c \
+  --id 027c010c-e769-eb1b-2ebe-a4b819fcbbd4 \
+  --id ced8afab-16e4-87ce-2f01-e297b45ba3c3
 ```
 
 Trace an allocation lifecycle:
@@ -74,6 +104,122 @@ Or resolve the evaluation from an allocation:
 
 ```bash
 python3 scripts/eval_trace.py bundles/<bundle>   --alloc <ALLOC_ID>
+```
+
+Review case-reported leads without treating them as bundle evidence:
+
+```bash
+python3 scripts/case_review.py bundles/<bundle> \
+  --case-context examples/case_context.example.json
+```
+
+Use `examples/case_context.example.json` as the schema template. The case
+context is optional to the broader toolkit workflow; `case_review.py` requires
+it because its sole purpose is to review that structured input against a bundle.
+
+After using your jump-box `ticket <CASE-ID>` command, run intake directly from
+the ticket directory. This is useful when the bundle is nested inside an
+unpacked diagnostic archive:
+
+```bash
+python3 /path/to/jumptoolkit/scripts/case_intake.py \
+  --case-context /path/to/case_context.json
+```
+
+An explicit case directory is also accepted as the optional first argument.
+Derived intake output defaults to `~/analysis_case_intake`, outside the ticket
+directory; use `--output` to select another approved analysis location.
+
+`case_intake.py` never unpacks archives or reads case artifact contents. If it
+finds more than one standard bundle, it refuses to choose and prints compact
+candidate paths for `--bundle` selection. Its `next_steps.md` contains the
+copy/paste commands for the selected bundle.
+
+## Finding Identifiers
+
+`find_identifiers_v2.py` is the toolkit's exact cross-bundle search tool. Use
+it when you already have a value from a case, log line, Nomad object, or another
+tool and want to determine where that value appears in the collected artifacts.
+
+The script does **not** assume that `--id` is a particular Nomad object type.
+It searches for the supplied value exactly and lets the source artifact provide
+the context. This makes the same command useful for:
+
+- allocation IDs
+- node IDs
+- evaluation IDs
+- deployment IDs
+- job IDs or names
+- namespaces
+- hostnames
+- IP addresses
+- other exact strings present in searchable bundle artifacts
+
+It scans searchable text artifacts while skipping obvious binary/profile/archive
+files, streams files line by line, counts all matches, and retains only a bounded
+number of context samples. Matches are categorized so higher-value forensic
+sources such as eventstream, allocation/evaluation/deployment/job/node snapshots,
+scheduler snapshots, and monitor logs can be distinguished from repetitive
+metrics or generic text.
+
+Typical output is written to:
+
+```text
+analysis_find_identifiers/
+├── results.csv
+├── results.md
+└── summary.json
+```
+
+Inspect `results.md` first. `results.csv` contains the detailed source-attributed
+matches, including source path and line information, while `summary.json`
+provides machine-readable counts.
+
+Useful options include:
+
+```text
+--id <VALUE>            Exact value to search for; repeat for multiple values.
+--ignore-case           Perform a case-insensitive search.
+--samples-per-file N    Bound the number of retained sample lines per file/value.
+--sample-width N        Bound the amount of context retained around each match.
+--output <DIR>          Choose a derived output directory.
+```
+
+`find_identifiers_v2.py` is a discovery tool: it tells you where an exact value
+appears, but it does not interpret the relationships between those references.
+Use the object-aware tools for that interpretation:
+
+- `alloc_lifecycle_v2.py` reconstructs what happened to an allocation over time.
+- `alloc_lineage_v2.py` follows allocation predecessor, replacement, and reschedule relationships.
+- `eval_trace.py` follows scheduler evaluation chains and allocation-to-evaluation links.
+- `correlate_timeline_v2.py` combines related allocations, nodes, evaluations, jobs, structured events, and logs into a shared timeline.
+
+A practical workflow looks like this:
+
+```text
+I have this UUID or exact value from a customer log.
+        │
+        ▼
+find_identifiers_v2.py
+"What is this showing up in?"
+        │
+        ├── looks like an allocation
+        │       │
+        │       ├── alloc_lifecycle_v2.py
+        │       │   "What happened to it?"
+        │       │
+        │       └── alloc_lineage_v2.py
+        │           "What replaced it / what did it replace?"
+        │
+        ├── allocation has EvalID
+        │       │
+        │       └── eval_trace.py
+        │           "Why did the scheduler create/re-evaluate it?"
+        │
+        └── I now have alloc + node + eval
+                │
+                └── correlate_timeline_v2.py
+                    "Show me the combined incident timeline."
 ```
 
 ## Output

@@ -25,7 +25,7 @@ jumptoolkit/
 
 | Script | Purpose |
 |---|---|
-| `inventory_bundle_v2.py` | Inventory bundle structure, intervals, servers/clients, artifacts, sizes, hashes, and coverage. |
+| `inventory_bundle_v2.py` | Preflight an unfamiliar bundle: inventory structure, capture coverage, intervals, servers/clients, artifacts, sizes, hashes, and unusual incident-specific files so you know which analyses are actually supported. |
 | `find_identifiers_v2.py` | Search safely for allocation, node, eval, deployment, job, and other identifiers with bounded context. |
 | `extract_window_v2.py` | Extract artifacts and filtered logs for a requested UTC time window. |
 | `alloc_lifecycle_v2.py` | Build a chronological lifecycle for one allocation from snapshots, eventstream data, and monitor logs. |
@@ -134,6 +134,126 @@ directory; use `--output` to select another approved analysis location.
 finds more than one standard bundle, it refuses to choose and prints compact
 candidate paths for `--bundle` selection. Its `next_steps.md` contains the
 copy/paste commands for the selected bundle.
+
+## Inventory / Preflight
+
+`inventory_bundle_v2.py` is the toolkit's reconnaissance step. Run it first on
+an unfamiliar bundle to answer:
+
+> **What exactly did I receive, how complete is it, and what kind of analysis is possible?**
+
+It inventories the bundle itself rather than investigating a specific Nomad
+object. Typical findings include:
+
+- interval IDs and missing interval gaps
+- which interval artifacts are present and how often they appear
+- captured server and client identities
+- cluster artifacts such as `eventstream.json`
+- profile availability
+- file sizes and SHA-256 hashes
+- unusual or incident-specific files that are not part of the normal bundle shape
+
+For example, a summary such as:
+
+```text
+intervals             : 0000-0003
+missing intervals     : none
+servers               : 10
+clients               : 10
+eventstream.json      : present
+allocations.json      : 4/4 intervals
+evaluations.json      : 4/4 intervals
+jobs.json             : 4/4 intervals
+```
+
+tells you that repeated allocation/evaluation state is available and that
+object-aware tools have useful coverage to work with.
+
+The inventory can also expose limitations before you draw conclusions. Examples:
+
+```text
+allocations.json      : 0 usable snapshots
+eventstream.json      : absent
+```
+
+That would make allocation lifecycle or lineage analysis much weaker. Likewise,
+missing interval IDs may explain apparent jumps in state that would otherwise
+look like unexplained transitions.
+
+### Discovering nonstandard evidence
+
+One of the most useful inventory functions is surfacing artifacts that were
+added specifically for an incident. A bundle may contain normal files such as
+`allocations.json`, `evaluations.json`, and `nodes.json` alongside targeted
+artifacts such as:
+
+```text
+problem-job.eval
+problem-job.txt
+running.count
+custom-allocation-query.out
+```
+
+Those files may contain some of the most relevant evidence in the case even
+though the object-specific toolkit scripts do not know about them automatically.
+
+### Why the other scripts do not require inventory output
+
+The current object-aware scripts do **not** require `bundle_summary.json` or
+`inventory.csv` as input. They intentionally rediscover the small amount of
+bundle structure they need so each script can still be copied to a jump box and
+run independently.
+
+Conceptually:
+
+```text
+inventory exists?
+        │
+        ├── yes → use it as preflight / evidence-coverage context
+        │
+        └── no  → object-aware scripts can still inspect the bundle directly
+```
+
+This avoids turning the toolkit into a strict pipeline where
+`inventory_bundle_v2.py` must always run before any other command.
+
+The inventory output is therefore **situational awareness and validation**, not
+a hard dependency. It helps you choose the right next tool and understand the
+limits of the evidence those tools will analyze.
+
+```text
+                         inventory_bundle_v2.py
+                                  │
+                     "What data do I actually have?"
+                                  │
+             ┌────────────────────┼────────────────────┐
+             │                    │                    │
+     allocations/evals        monitor logs       unusual artifacts
+     present repeatedly        available          discovered
+             │                    │                    │
+             ▼                    ▼                    ▼
+     alloc_lifecycle       correlate_timeline     inspect/search them
+     alloc_lineage
+     eval_trace
+```
+
+Typical inventory output is written to:
+
+```text
+analysis_inventory/
+├── inventory.csv
+├── inventory.md
+└── bundle_summary.json
+```
+
+Use `inventory.md` for the human-readable preflight report,
+`bundle_summary.json` for compact machine-readable coverage information, and
+`inventory.csv` when you need per-file provenance, size, classification, or
+hash details.
+
+Hashes are mainly useful for integrity and reproducibility—for example, proving
+that two analyses used the same source artifact or noticing that two copies of a
+bundle differ.
 
 ## Finding Identifiers
 

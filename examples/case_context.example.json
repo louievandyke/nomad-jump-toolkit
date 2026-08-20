@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "case_reference": "TS-example",
+  "classification": "case-reported context; not bundle-derived evidence",
+  "incident_window_utc": {
+    "start": "",
+    "end": ""
+  },
+  "seeds": {
+    "job_ids": ["example-job-id"],
+    "allocation_ids": ["00000000-0000-0000-0000-000000000000"],
+    "evaluation_ids": [],
+    "node_ids": [],
+    "deployment_ids": []
+  },
+  "claims_to_test": [
+    {
+      "id": "allocation-churn",
+      "claim": "Reported allocation churn occurred during node rotation.",
+      "source": "case TS-example",
+      "evidence_needed": [
+        "captured allocation IDs",
+        "authoritative lineage or reschedule fields",
+        "interval observation times"
+      ]
+    }
+  ]
+}

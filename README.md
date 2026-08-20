@@ -117,23 +117,34 @@ Use `examples/case_context.example.json` as the schema template. The case
 context is optional to the broader toolkit workflow; `case_review.py` requires
 it because its sole purpose is to review that structured input against a bundle.
 
+## Case Intake on a Jump Box
+
 After using your jump-box `ticket <CASE-ID>` command, run intake directly from
-the ticket directory. This is useful when the bundle is nested inside an
-unpacked diagnostic archive:
+the ticket directory. It discovers nested Nomad debug bundles, indexes adjacent
+case artifacts by name and metadata only, and writes its derived output outside
+the ticket directory:
+
+```bash
+python3 /path/to/jumptoolkit/scripts/case_intake.py
+```
+
+An explicit case directory is also accepted as the optional first argument.
+Derived intake output defaults to `~/analysis_case_intake`, outside the ticket
+directory; use `--output` to select another approved analysis location. To
+record a reviewed case-context sidecar in the intake output and generate a
+matching review command, add `--case-context`:
 
 ```bash
 python3 /path/to/jumptoolkit/scripts/case_intake.py \
   --case-context /path/to/case_context.json
 ```
 
-An explicit case directory is also accepted as the optional first argument.
-Derived intake output defaults to `~/analysis_case_intake`, outside the ticket
-directory; use `--output` to select another approved analysis location.
-
 `case_intake.py` never unpacks archives or reads case artifact contents. If it
 finds more than one standard bundle, it refuses to choose and prints compact
 candidate paths for `--bundle` selection. Its `next_steps.md` contains the
-copy/paste commands for the selected bundle.
+copy/paste commands for the selected bundle. When comparing several node-local
+captures, run one intake per selected bundle and use a distinct `--output` base
+for each derived report.
 
 ## Inventory / Preflight
 

@@ -12,6 +12,7 @@ The toolkit is designed for restricted jump boxes where customer artifacts shoul
 jumptoolkit/
 ├── README.md
 ├── AGENTS.md
+├── nomad-intake.sh
 ├── scripts/
 ├── bundles/
 └── analysis/
@@ -125,8 +126,27 @@ case artifacts by name and metadata only, and writes its derived output outside
 the ticket directory:
 
 ```bash
-python3 /path/to/jumptoolkit/scripts/case_intake.py
+/path/to/jumptoolkit/nomad-intake.sh
 ```
+
+For a short command that works from any ticket directory, install a symlink in
+a directory already on your `PATH`:
+
+```bash
+mkdir -p "$HOME/bin"
+ln -s /path/to/jumptoolkit/nomad-intake.sh "$HOME/bin/nomad-intake"
+```
+
+Then the normal ECuRep workflow is simply:
+
+```bash
+ticket TS022772440
+nomad-intake
+```
+
+The launcher resolves its real location even when invoked through the symlink
+and passes every argument through to `case_intake.py`. Running the Python script
+directly remains supported.
 
 An explicit case directory is also accepted as the optional first argument.
 Derived intake output defaults to `~/analysis_case_intake`, outside the ticket
@@ -135,7 +155,7 @@ record a reviewed case-context sidecar in the intake output and generate a
 matching review command, add `--case-context`:
 
 ```bash
-python3 /path/to/jumptoolkit/scripts/case_intake.py \
+/path/to/jumptoolkit/nomad-intake.sh \
   --case-context /path/to/case_context.json
 ```
 

@@ -167,14 +167,25 @@ def case_reference(case_root: Path) -> str:
     return match.group(0).upper() if match else case_root.name
 
 
+def is_ecurep_case_path(case_root: Path) -> bool:
+    """Return whether this appears to be an ECuRep case directory.
+
+    Both signals are required so an arbitrary headless Linux path is never
+    treated as ECuRep: the path must be under the ECuRep tree and contain a
+    recognizable TS case reference.
+    """
+    return "/ecurep/" in case_root.as_posix() and CASE_ID_RE.search(str(case_root)) is not None
+
+
 def slug(value: str) -> str:
     return (re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip(".-") or "case-intake")[:80]
 
 
-def write_outputs(run_dir: Path, case_root: Path, case_id: str, candidates: list[BundleCandidate], selected: BundleCandidate, artifacts: list[CaseArtifact], context_path: Path | None, discovery_errors: int, artifact_errors: int) -> None:
+def write_outputs(run_dir: Path, case_root: Path, case_id: str, ecurep_case_detected: bool, candidates: list[BundleCandidate], selected: BundleCandidate, artifacts: list[CaseArtifact], context_path: Path | None, discovery_errors: int, artifact_errors: int) -> None:
     summary = {
         "case_root": str(case_root),
         "case_reference": case_id,
+        "ecurep_case_detected": ecurep_case_detected,
         "case_context_path": str(context_path) if context_path else "",
         "bundle_candidates": [asdict(item) for item in candidates],
         "selected_bundle": asdict(selected),
@@ -216,6 +227,7 @@ def write_outputs(run_dir: Path, case_root: Path, case_id: str, candidates: list
         fh.write("# Case Intake\n\n")
         fh.write(f"- Case root: `{case_root}`\n")
         fh.write(f"- Case reference: `{case_id}`\n")
+        fh.write(f"- ECuRep case detected: `{'yes' if ecurep_case_detected else 'no'}`\n")
         fh.write(f"- Selected bundle: `{selected.path}`\n")
         fh.write(f"- Case-context file supplied: `{context_path or ''}`\n")
         fh.write("- Scope: directory navigation only; no artifact content was used for conclusions.\n\n")
@@ -270,8 +282,12 @@ def main() -> int:
     # default. --output remains available for an approved analysis volume.
     output_base = args.output.expanduser().resolve() if args.output else (Path.home() / "analysis_case_intake").resolve()
     case_id = case_reference(case_root)
+    ecurep_case_detected = is_ecurep_case_path(case_root)
     run_dir = output_base / slug(case_id)
+    if ecurep_case_detected:
+        print(f"ECuRep case detected : {case_id}")
     print(f"Case root        : {case_root}")
+    print(f"Derived output   : {run_dir}")
     print(f"Search depth     : {args.max_depth}")
     print("Discovering Nomad debug bundle roots without reading source artifacts...")
     candidates, discovery_errors = discover_bundles(case_root, output_base, args.max_depth)
@@ -303,7 +319,7 @@ def main() -> int:
     print(f"Selected bundle  : {selected.path}")
     print("Indexing adjacent case artifacts by name and metadata only...")
     artifacts, artifact_errors = collect_case_artifacts(case_root, Path(selected.path), output_base, args.max_depth)
-    write_outputs(run_dir, case_root, case_id, candidates, selected, artifacts, context_path, discovery_errors, artifact_errors)
+    write_outputs(run_dir, case_root, case_id, ecurep_case_detected, candidates, selected, artifacts, context_path, discovery_errors, artifact_errors)
     print("Done.")
     print(f"  Bundle candidates          : {len(candidates)}")
     print(f"  Adjacent artifacts indexed : {len(artifacts)}")

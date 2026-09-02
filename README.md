@@ -35,6 +35,7 @@ jumptoolkit/
 | `eval_trace.py` | Trace evaluation relationships using `PreviousEval`, `NextEval`, and `BlockedEval`, and associate allocations through `EvalID`. |
 | `case_review.py` | Review exact identifiers from a structured, case-reported investigation brief while keeping case context separate from bundle-derived evidence. |
 | `case_intake.py` | Discover nested debug bundles in a case artifact directory, map adjacent artifacts, and generate bounded next-step commands. |
+| `sanitize.py` | Redact PII, secrets, IPs, hostnames, and customer names from analysis output before pasting into an AI tool. Supports three profiles and optional redaction reports. |
 
 `_bundlelib.py` is a shared internal module (bundle-root detection, timestamp
 parsing, eventstream iteration, and similar helpers) used by all seven
@@ -382,6 +383,72 @@ Scripts generate derived artifacts under `analysis/` or a script-specific analys
 - JSON for machine-readable provenance and follow-on analysis
 
 Inspect the Markdown output first unless a script says otherwise.
+
+## Sanitizing Output Before Pasting to an AI Tool
+
+`sanitize.py` wraps the vendored `sanitizer` package to redact PII, secrets,
+IPs, hostnames, and customer names from analysis output before you paste it into
+an AI assistant. It reads a file or stdin and writes sanitized text to stdout
+(or `--output`).
+
+**The `sanitizer/` package is vendored at the project root — no `pip install`
+or internet access is required on the jump box.**
+
+### Profiles
+
+| Profile | When to use |
+|---|---|
+| `infra-safe` (default) | Keeps infrastructure context useful. Redacts secrets, IPs, hostnames, URLs, and customer names while preserving ports, protocols, and error text. |
+| `case-summary` | Optimised for pasting into an AI assistant. Keeps product names, versions, and the technical narrative readable. |
+| `strict` | Aggressive. Also redacts UUIDs and phone numbers. Use when unsure whether the content is safe. |
+
+### Usage
+
+Sanitize a toolkit analysis file before pasting into an AI tool:
+
+```bash
+python3 scripts/sanitize.py analysis/results.md
+```
+
+Write sanitized output to a file and print a redaction summary:
+
+```bash
+python3 scripts/sanitize.py analysis/results.md \
+  --output analysis/results_sanitized.md \
+  --report
+```
+
+Pipe directly from another toolkit script (e.g. inventory preflight):
+
+```bash
+python3 scripts/inventory_bundle_v2.py bundles/<bundle> \
+  | python3 scripts/sanitize.py --profile case-summary
+```
+
+Redact a specific customer or org name on top of the default patterns:
+
+```bash
+python3 scripts/sanitize.py analysis/results.md \
+  --customer acme-corp \
+  --report
+```
+
+Use `--profile strict` when you want UUIDs (alloc/node/eval IDs) redacted too
+and are pasting into an external tool that should not see them:
+
+```bash
+python3 scripts/sanitize.py analysis/results.md --profile strict --report
+```
+
+Use `--debug` **locally only** to see original values alongside redaction
+placeholders in the report:
+
+```bash
+python3 scripts/sanitize.py analysis/results.md --report --debug
+```
+
+The sanitizer reduces risk but does not guarantee the output is safe to share
+externally. Always review the sanitized output before pasting.
 
 ## Safety Model
 
